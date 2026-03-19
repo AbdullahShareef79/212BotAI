@@ -1,13 +1,14 @@
-"""Beautiful terminal dashboard v2 powered by Rich.
+"""Beautiful terminal dashboard v3 powered by Rich.
 
 Renders a live-updating panel showing:
-  • Bot status & next scan time
-  • Open positions with trailing stops and sector info
-  • Recent scan results with AI confidence
-  • Trade history with realised P&L
-  • Sector allocation
-  • Performance analytics (Sharpe, drawdown, win rate by sector)
-  • AI confidence performance
+  * Bot status & next scan time
+  * Open positions with trailing stops and sector info
+  * Recent scan results with AI confidence & catalyst scores
+  * Trade history with realised P&L
+  * Sector allocation
+  * Performance analytics (Sharpe, drawdown, win rate by sector)
+  * AI confidence performance
+  * Aggressive strategy momentum & catalyst info
 """
 
 from __future__ import annotations
@@ -109,94 +110,112 @@ class Dashboard:
         grid.add_column(ratio=1)
         grid.add_column(ratio=1)
         grid.add_row(
-            Text("📊 StockBot AI v2", style="bold cyan"),
+            Text("StockBot AI v3", style="bold cyan"),
             mode,
             defense,
-            Text(f"⏰ Next scan: {self._next_scan}", style="dim"),
+            Text(f"Next scan: {self._next_scan}", style="dim"),
         )
         open_count = self.db.count_open_positions()
+        safe_count = self.db.count_open_positions("SAFE")
+        agg_count = self.db.count_open_positions("AGGRESSIVE")
         grid.add_row(
             Text(f"Status: {self._status}", style="italic"),
-            Text(f"Positions: {open_count}/10", style="bold"),
+            Text(f"Positions: {open_count} (S:{safe_count} A:{agg_count})", style="bold"),
             Text(f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"),
             Text(""),
         )
-        return Panel(grid, title="[bold cyan]StockBot AI v2[/bold cyan]", border_style="cyan")
+        return Panel(grid, title="[bold cyan]StockBot AI v3[/bold cyan]", border_style="cyan")
 
     def _open_positions_table(self) -> Panel:
         table = Table(show_header=True, header_style="bold magenta", expand=True, show_lines=False)
         table.add_column("Ticker", style="bold")
+        table.add_column("Type", width=3)
         table.add_column("Sector", style="dim")
-        table.add_column("Entry €", justify="right")
+        table.add_column("Entry", justify="right")
         table.add_column("Qty", justify="right")
         table.add_column("Conf", justify="right")
-        table.add_column("Trail High", justify="right")
-        table.add_column("Partial?", justify="center")
-        table.add_column("PT", justify="right")
+        table.add_column("Cat", justify="right")
+        table.add_column("Trail", justify="right")
+        table.add_column("TP Tier", justify="center")
         table.add_column("Opened", style="dim")
 
         open_buys = self.db.get_open_buys()
         if not open_buys:
-            table.add_row("—", "—", "—", "—", "—", "—", "—", "—", "No open positions")
+            table.add_row("--", "--", "--", "--", "--", "--", "--", "--", "--", "No open positions")
         for b in open_buys:
             conf = b.get("confidence", 0) or 0
-            pt = b.get("price_target")
+            cat = b.get("catalyst_score", 0) or 0
             trail = b.get("trailing_stop_high")
+            strat = b.get("strategy_type", "SAFE")
+            tp_tier = b.get("tp_tier", 0) or 0
+            strat_badge = Text(" S ", style="bold white on dark_green") if strat == "SAFE" \
+                else Text(" A ", style="bold white on red")
+            cat_text = Text(f"{cat}/10", style="bold yellow") if cat > 0 else Text("--", style="dim")
+            tp_text = Text(f"T{tp_tier}", style="bold cyan") if tp_tier > 0 else Text("--", style="dim")
             table.add_row(
                 b["ticker"],
+                strat_badge,
                 (b.get("sector") or get_sector(b["ticker"]))[:12],
                 f"{b['price']:.2f}",
                 f"{b['quantity']:.4f}",
                 _confidence_bar(conf),
-                f"€{trail:.2f}" if trail else "—",
-                "✅" if b.get("partial_sold") else "—",
-                f"€{pt:.2f}" if pt else "—",
+                cat_text,
+                f"{trail:.2f}" if trail else "--",
+                tp_text,
                 (b.get("timestamp") or "")[:16],
             )
-        return Panel(table, title="[bold magenta]📈 Open Positions[/bold magenta]", border_style="magenta")
+        return Panel(table, title="[bold magenta]Open Positions[/bold magenta]", border_style="magenta")
 
     def _scan_results_table(self) -> Panel:
         table = Table(show_header=True, header_style="bold blue", expand=True, show_lines=False)
         table.add_column("Ticker", style="bold")
+        table.add_column("Type", width=3)
         table.add_column("Action")
         table.add_column("Conf", justify="right")
+        table.add_column("Cat", justify="right")
+        table.add_column("Mom", justify="right")
         table.add_column("RSI", justify="right")
-        table.add_column("BB%", justify="right")
-        table.add_column("RS", justify="right")
         table.add_column("Sector", style="dim")
-        table.add_column("Reason", max_width=45)
+        table.add_column("Reason", max_width=40)
 
         if not self._last_scan_results:
-            table.add_row("—", "—", "—", "—", "—", "—", "—", "Awaiting first scan…")
-        for r in self._last_scan_results[:20]:
+            table.add_row("--", "--", "--", "--", "--", "--", "--", "--", "Awaiting first scan...")
+        for r in self._last_scan_results[:25]:
             action_colors = {
                 "BUY": "bold green", "SELL": "bold red",
                 "PARTIAL_SELL": "bold yellow", "HOLD": "dim",
             }
             action_style = action_colors.get(r.action, "")
             ind = r.indicators
-            sent = r.sentiment
+            strat = getattr(r, 'strategy_type', 'SAFE')
+            strat_badge = Text("S", style="green") if strat == "SAFE" else Text("A", style="red")
+            cat = getattr(r, 'catalyst_score', 0)
+            mom = getattr(r, 'momentum_score', 0)
+            cat_text = Text(f"{cat}", style="bold yellow") if cat > 0 else Text("--", style="dim")
+            mom_text = Text(f"{mom:.0f}", style="bold cyan") if mom > 0 else Text("--", style="dim")
             table.add_row(
                 r.ticker,
+                strat_badge,
                 Text(r.action, style=action_style),
-                _confidence_bar(r.confidence) if r.confidence else Text("—", style="dim"),
-                f"{ind.rsi:.1f}" if ind else "—",
-                f"{ind.bb_pband:.2f}" if ind else "—",
-                f"{r.rs_ratio:.2f}" if r.rs_ratio else "—",
-                r.sector[:10] if r.sector else "—",
-                r.reason[:45],
+                _confidence_bar(r.confidence) if r.confidence else Text("--", style="dim"),
+                cat_text,
+                mom_text,
+                f"{ind.rsi:.1f}" if ind else "--",
+                r.sector[:10] if r.sector else "--",
+                r.reason[:40],
             )
-        return Panel(table, title="[bold blue]🔍 Last Scan Results[/bold blue]", border_style="blue")
+        return Panel(table, title="[bold blue]Last Scan Results[/bold blue]", border_style="blue")
 
     def _trade_history_table(self) -> Panel:
         table = Table(show_header=True, header_style="bold yellow", expand=True, show_lines=False)
         table.add_column("ID", style="dim")
         table.add_column("Ticker", style="bold")
+        table.add_column("Str", width=3)
         table.add_column("Side")
         table.add_column("Type", style="dim")
-        table.add_column("Price €", justify="right")
+        table.add_column("Price", justify="right")
         table.add_column("P&L")
-        table.add_column("Conf", justify="right")
+        table.add_column("Cat", justify="right")
         table.add_column("Dry?", justify="center")
         table.add_column("Time", style="dim")
 
@@ -204,18 +223,23 @@ class Dashboard:
         for t in trades:
             side_colors = {"BUY": "green", "SELL": "red", "PARTIAL_SELL": "yellow"}
             side_style = side_colors.get(t["side"], "")
+            strat = t.get("strategy_type", "SAFE")
+            strat_text = Text("S", style="green") if strat == "SAFE" else Text("A", style="red")
+            cat = t.get("catalyst_score", 0) or 0
+            cat_text = Text(str(cat), style="yellow") if cat > 0 else Text("--", style="dim")
             table.add_row(
                 str(t["id"]),
                 t["ticker"],
+                strat_text,
                 Text(t["side"], style=side_style),
                 (t.get("sell_type") or "")[:10],
                 f"{t['price']:.2f}",
                 _color_pnl(t.get("pnl")),
-                str(t.get("confidence", "")),
-                "🧪" if t.get("dry_run") else "🔴",
+                cat_text,
+                "dry" if t.get("dry_run") else "LIVE",
                 (t.get("timestamp") or "")[:16],
             )
-        return Panel(table, title="[bold yellow]📋 Trade History[/bold yellow]", border_style="yellow")
+        return Panel(table, title="[bold yellow]Trade History[/bold yellow]", border_style="yellow")
 
     def _sector_allocation_panel(self) -> Panel:
         open_buys = self.db.get_open_buys()

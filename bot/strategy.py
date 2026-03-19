@@ -1,11 +1,18 @@
-"""Core trading strategy v2 – AI confidence + sector rotation + smart exits.
+"""Core trading strategy v3 – hybrid safe + aggressive orchestrator.
 
-BUY  when: AI confidence >= 75  AND  RSI < 40  AND  price at lower BB
-           AND  beating S&P 500  AND  not in earnings blackout
-           AND  sector allocation < 20%  AND  open positions < max
-SELL when: trailing stop  OR  partial TP at +3% / full TP at +8%
-           OR  AI sentiment turns NEGATIVE (immediate)
-           OR  weekly rebalance
+SAFE (original):
+  BUY  when: AI confidence >= 75  AND  RSI < 40  AND  price at lower BB
+             AND  beating S&P 500  AND  not in earnings blackout
+             AND  sector allocation < 20%  AND  open positions < max
+  SELL when: trailing stop  OR  partial TP at +3% / full TP at +8%
+             OR  AI sentiment turns NEGATIVE (immediate)
+             OR  weekly rebalance
+
+AGGRESSIVE (v3):
+  BUY  when: momentum score >= 50  AND  catalyst score >= 7
+             AND  volume ratio >= 3x  AND  conviction-based sizing
+  SELL when: multi-tier TP (+15% / +30% / +50%) with trailing
+             OR  hard stop at -5%
 """
 
 from __future__ import annotations
@@ -30,17 +37,19 @@ from bot.sectors import (
 from bot.earnings import is_in_earnings_blackout, get_earnings_info
 from bot.relative_strength import calc_relative_strength, is_beating_market, clear_cache
 
+# v3 imports
+from bot.catalyst import CatalystAnalyzer
+from bot.strategy_aggressive import AggressiveStrategy, AggressiveScanResult
+from bot.watchlist import (
+    TIER1_SAFE, TIER2_AGGRESSIVE, get_tier,
+    get_safe_watchlist, get_aggressive_watchlist,
+)
+
 log = logging.getLogger(__name__)
 
-# Top 50 most-traded tickers on Trading 212 (EU-accessible US & EU blue-chips).
-DEFAULT_WATCHLIST: list[str] = [
-    "AAPL", "MSFT", "AMZN", "GOOGL", "META", "TSLA", "NVDA", "JPM",
-    "V", "JNJ", "WMT", "PG", "UNH", "HD", "MA", "DIS", "BAC",
-    "XOM", "ADBE", "CRM", "NFLX", "CSCO", "PFE", "INTC", "KO",
-    "PEP", "ABT", "TMO", "MRK", "AVGO", "COST", "NKE", "CVX",
-    "LLY", "ORCL", "ACN", "MCD", "MDT", "TXN", "QCOM", "AMD",
-    "PYPL", "AMGN", "LOW", "IBM", "GE", "CAT", "BA", "SBUX", "UBER",
-]
+# Default watchlist now comes from the watchlist module (Tier 1 safe blue chips).
+# Kept as alias for backwards compatibility.
+DEFAULT_WATCHLIST: list[str] = TIER1_SAFE
 
 
 @dataclass
@@ -57,10 +66,16 @@ class ScanResult:
     rs_ratio: float | None = None
     earnings_blackout: bool = False
     sell_type: str = ""
+    # v3 fields
+    strategy_type: str = "SAFE"  # SAFE / AGGRESSIVE
+    catalyst_score: int = 0
+    momentum_score: float = 0.0
+    conviction_tier: str = ""
+    position_size_pct: float = 0.0
 
 
 class Strategy:
-    """Orchestrates a full scan-and-trade cycle with v2 logic."""
+    """Orchestrates a full scan-and-trade cycle – safe + aggressive."""
 
     def __init__(
         self,
@@ -69,6 +84,7 @@ class Strategy:
         analyzer: SentimentAnalyzer,
         db: TradeDB,
         notifier: TelegramNotifier | None = None,
+        catalyst_analyzer: CatalystAnalyzer | None = None,
     ) -> None:
         self.t212 = t212
         self.news = news
@@ -78,24 +94,37 @@ class Strategy:
         self._defensive_mode = False
         self._sector_perfs: list = []
 
+        # v3: aggressive strategy (created only when catalyst analyzer is available)
+        self._aggressive: AggressiveStrategy | None = None
+        if catalyst_analyzer and cfg.agg_enabled:
+            self._aggressive = AggressiveStrategy(
+                t212, news, analyzer, catalyst_analyzer, db, notifier,
+            )
+            log.info("Aggressive strategy ENABLED (catalyst + momentum)")
+        else:
+            log.info("Aggressive strategy disabled (no catalyst analyzer or AGG_ENABLED=false)")
+
     # ── public ───────────────────────────────────────────────
 
     def run_full_scan(self, watchlist: list[str] | None = None) -> list[ScanResult]:
-        """Run the morning scan on the watchlist. Returns per-ticker results."""
+        """Run the morning scan on the watchlist. Returns per-ticker results.
+
+        v3: Also runs the aggressive momentum scan if enabled.
+        """
         tickers = watchlist or DEFAULT_WATCHLIST
         results: list[ScanResult] = []
 
         # Clear cached S&P 500 data for fresh calculations
         clear_cache()
 
-        log.info("═══ Starting v2 scan on %d tickers ═══", len(tickers))
+        log.info("=== Starting v3 scan on %d safe tickers ===", len(tickers))
 
         # 0. Sector rotation check
         try:
             self._sector_perfs = get_sector_performance()
             self._defensive_mode = should_rotate_to_defensive(self._sector_perfs)
             if self._defensive_mode:
-                log.info("🛡️ DEFENSIVE MODE ACTIVE – prioritising defensive sectors")
+                log.info("DEFENSIVE MODE ACTIVE -- prioritising defensive sectors")
         except Exception as exc:
             log.warning("Sector rotation check failed: %s", exc)
 
@@ -106,12 +135,39 @@ class Strategy:
         sell_results = self._check_sells()
         results.extend(sell_results)
 
-        # 2. Scan for new buy opportunities
+        # 2. Scan for new buy opportunities (safe strategy)
         buy_results = self._check_buys(tickers)
         results.extend(buy_results)
 
+        # 3. v3: Run aggressive momentum scan
+        if self._aggressive:
+            log.info("=== Running AGGRESSIVE momentum scan ===")
+            try:
+                agg_results = self._aggressive.run_aggressive_scan()
+                # Convert AggressiveScanResult -> ScanResult for unified display
+                for ar in agg_results:
+                    results.append(ScanResult(
+                        ticker=ar.ticker,
+                        action=ar.action,
+                        reason=f"[AGG] {ar.reason}",
+                        indicators=ar.indicators,
+                        sentiment=ar.sentiment,
+                        entry_price=ar.entry_price,
+                        pnl_pct=ar.pnl_pct,
+                        confidence=ar.confidence,
+                        sector=ar.sector,
+                        sell_type=ar.sell_type,
+                        strategy_type="AGGRESSIVE",
+                        catalyst_score=ar.catalyst_score,
+                        momentum_score=ar.momentum.momentum_score if ar.momentum else 0,
+                        conviction_tier=ar.conviction_tier,
+                        position_size_pct=ar.position_size_pct,
+                    ))
+            except Exception as exc:
+                log.error("Aggressive scan failed: %s", exc, exc_info=True)
+
         log.info(
-            "═══ Scan complete: %d sells, %d partial, %d buys, %d holds ═══",
+            "=== Scan complete: %d sells, %d partial, %d buys, %d holds ===",
             sum(1 for r in results if r.action == "SELL"),
             sum(1 for r in results if r.action == "PARTIAL_SELL"),
             sum(1 for r in results if r.action == "BUY"),

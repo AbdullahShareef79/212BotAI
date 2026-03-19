@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 """
-StockBot AI v2 – AI-powered stock trading bot for Trading 212.
+StockBot AI v3 -- AI-powered hybrid stock trading bot for Trading 212.
 
 Usage:
     python main.py                Run in scheduled mode (scans at market open)
     python main.py --scan-now     Run a single scan immediately
+    python main.py --momentum     Run momentum scan only (aggressive tier)
     python main.py --rebalance    Run portfolio rebalance immediately
     python main.py --analytics    Show performance analytics and exit
     python main.py --dashboard    Show dashboard without scanning
     python main.py --dry-run      Override .env and force dry-run
-    python main.py --live         Override .env and force live mode (⚠ real money!)
+    python main.py --live         Override .env and force live mode (real money!)
+    python main.py --no-aggressive Disable aggressive strategy for this run
 """
 
 from __future__ import annotations
@@ -43,12 +45,15 @@ from config import cfg  # noqa: E402 (must come after logging setup)
 from bot.trading212 import Trading212Client  # noqa: E402
 from bot.news import NewsClient  # noqa: E402
 from bot.sentiment import SentimentAnalyzer  # noqa: E402
+from bot.catalyst import CatalystAnalyzer  # noqa: E402
 from bot.database import TradeDB  # noqa: E402
 from bot.strategy import Strategy, DEFAULT_WATCHLIST  # noqa: E402
 from bot.dashboard import Dashboard  # noqa: E402
 from bot.notifier import TelegramNotifier  # noqa: E402
 from bot.scheduler import setup_schedule, run_loop, next_run_str  # noqa: E402
 from bot.analytics import compute_analytics  # noqa: E402
+from bot.watchlist import get_safe_watchlist, get_aggressive_watchlist, watchlist_summary  # noqa: E402
+from bot.momentum import get_top_movers  # noqa: E402
 
 console = Console()
 
@@ -56,26 +61,29 @@ console = Console()
 BANNER = """
 [bold cyan]
   +-------------------------------------------------------+
-  |  StockBot AI v2                                       |
+  |  StockBot AI v3  --  Hybrid Safe + Aggressive          |
   |  AI-Powered Trading  *  Trading 212  *  GPT-4o-mini   |
+  |  Momentum Scanner  *  Catalyst Detection  *  Multi-TP  |
   +-------------------------------------------------------+
 [/bold cyan]
 """
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="StockBot AI v2 – Trading 212 bot")
+    p = argparse.ArgumentParser(description="StockBot AI v3 -- Hybrid Trading 212 bot")
     p.add_argument("--scan-now", action="store_true", help="Run a single scan immediately and exit")
+    p.add_argument("--momentum", action="store_true", help="Run momentum scan only (Tier 2 aggressive)")
     p.add_argument("--rebalance", action="store_true", help="Run portfolio rebalance and exit")
     p.add_argument("--analytics", action="store_true", help="Show performance analytics and exit")
     p.add_argument("--dashboard", action="store_true", help="Show dashboard only (no scan)")
     p.add_argument("--dry-run", action="store_true", help="Force dry-run mode")
     p.add_argument("--live", action="store_true", help="Force live mode (real money!)")
+    p.add_argument("--no-aggressive", action="store_true", help="Disable aggressive strategy")
     p.add_argument("--watchlist", nargs="*", help="Override default watchlist with custom tickers")
     return p.parse_args()
 
 
-def build_components(force_dry: bool = False, force_live: bool = False):
+def build_components(force_dry: bool = False, force_live: bool = False, no_aggressive: bool = False):
     """Instantiate all service objects."""
     # Dry-run override
     import config as _cfg_mod
@@ -83,10 +91,13 @@ def build_components(force_dry: bool = False, force_live: bool = False):
         object.__setattr__(_cfg_mod.cfg, "dry_run", True)
     if force_live:
         object.__setattr__(_cfg_mod.cfg, "dry_run", False)
+    if no_aggressive:
+        object.__setattr__(_cfg_mod.cfg, "agg_enabled", False)
 
     t212 = Trading212Client(cfg.trading212_api_key, cfg.trading212_base_url)
     news = NewsClient(cfg.newsapi_key)
     analyzer = SentimentAnalyzer(cfg.openai_api_key, model="gpt-4o-mini")
+    catalyst_analyzer = CatalystAnalyzer(cfg.openai_api_key, model="gpt-4o-mini")
     db = TradeDB(cfg.db_path)
 
     notifier = None
@@ -94,13 +105,13 @@ def build_components(force_dry: bool = False, force_live: bool = False):
         notifier = TelegramNotifier(cfg.telegram_bot_token, cfg.telegram_chat_id)
         log.info("Telegram notifications enabled")
     else:
-        log.info("Telegram not configured – notifications disabled")
+        log.info("Telegram not configured -- notifications disabled")
 
-    strategy = Strategy(t212, news, analyzer, db, notifier)
+    strategy = Strategy(t212, news, analyzer, db, notifier, catalyst_analyzer=catalyst_analyzer)
     dashboard = Dashboard(db)
     dashboard.set_dry_run(cfg.dry_run)
 
-    return t212, news, analyzer, db, strategy, dashboard, notifier
+    return t212, news, analyzer, catalyst_analyzer, db, strategy, dashboard, notifier
 
 
 def single_scan(strategy: Strategy, dashboard: Dashboard, watchlist: list[str]) -> None:
@@ -124,24 +135,38 @@ def main() -> None:
     args = parse_args()
 
     try:
-        t212, news, analyzer, db, strategy, dashboard, notifier = build_components(
+        t212, news, analyzer, catalyst_analyzer, db, strategy, dashboard, notifier = build_components(
             force_dry=args.dry_run, force_live=args.live,
+            no_aggressive=args.no_aggressive,
         )
     except EnvironmentError as exc:
         console.print(f"[bold red]Configuration error:[/bold red] {exc}")
-        console.print("Copy .env.example → .env and fill in your API keys.")
+        console.print("Copy .env.example -> .env and fill in your API keys.")
         sys.exit(1)
 
     watchlist = args.watchlist or DEFAULT_WATCHLIST
-    mode_str = "🧪 DRY-RUN" if cfg.dry_run else "🔴 LIVE"
-    console.print(f"  Mode: [bold]{mode_str}[/bold]   Watchlist: {len(watchlist)} tickers")
+    wl_info = watchlist_summary()
+    mode_str = "DRY-RUN" if cfg.dry_run else "LIVE"
+    agg_str = "ON" if cfg.agg_enabled else "OFF"
+    console.print(f"  Mode: [bold]{mode_str}[/bold]   Safe: {len(watchlist)} tickers   Aggressive: {wl_info['tier2_count']} tickers")
     console.print(
-        f"  Max Positions: {cfg.max_positions}   Sector Cap: {cfg.max_sector_pct}%"
+        f"  Max Positions: {cfg.max_positions} safe + {cfg.agg_max_positions} aggressive"
         f"   Min Confidence: {cfg.min_confidence}%"
     )
     console.print(
-        f"  TP: +{cfg.take_profit_pct}% (partial at +{cfg.partial_tp_pct}%)"
-        f"   SL: -{cfg.stop_loss_pct}% (trailing)\n"
+        f"  Safe TP: +{cfg.take_profit_pct}% (partial +{cfg.partial_tp_pct}%)"
+        f"   SL: -{cfg.stop_loss_pct}%"
+    )
+    console.print(
+        f"  Aggressive: [{agg_str}]  TP tiers: +{cfg.agg_tp_tier1}%/+{cfg.agg_tp_tier2}%/+{cfg.agg_tp_tier3}%"
+        f"   SL: -{cfg.agg_stop_loss_pct}%"
+    )
+    console.print(
+        f"  Catalyst min: {cfg.min_catalyst_score}/10"
+        f"   Momentum: >{cfg.momentum_min_gain_pct}% gain, {cfg.momentum_vol_multiplier}x vol"
+    )
+    console.print(
+        f"  Conviction sizing: {cfg.agg_size_moderate_pct}% / {cfg.agg_size_high_pct}% / {cfg.agg_size_max_pct}%\n"
     )
 
     # ── Mode: analytics ─────────────────────────────────────
@@ -158,6 +183,43 @@ def main() -> None:
         else:
             console.print("[dim]No rebalancing needed[/dim]")
         dashboard.print_static()
+        return
+
+    # ── Mode: momentum scan only ────────────────────────────
+    if args.momentum:
+        console.print("[bold cyan]Running momentum scan on Tier 2 watchlist...[/bold cyan]")
+        agg_tickers = get_aggressive_watchlist()
+        movers = get_top_movers(
+            agg_tickers, top_n=20,
+            min_gain_pct=cfg.momentum_min_gain_pct,
+            vol_multiplier=cfg.momentum_vol_multiplier,
+        )
+        if movers:
+            from rich.table import Table as RTable
+            t = RTable(title=f"Top {len(movers)} Momentum Signals", show_header=True)
+            t.add_column("Ticker", style="bold")
+            t.add_column("Score", justify="right")
+            t.add_column("Gain %", justify="right")
+            t.add_column("Vol Ratio", justify="right")
+            t.add_column("52w High?", justify="center")
+            t.add_column("Gap %", justify="right")
+            t.add_column("RSI", justify="right")
+            t.add_column("Green Days", justify="right")
+            for m in movers:
+                score_style = "bold green" if m.momentum_score >= 70 else "yellow" if m.momentum_score >= 50 else "dim"
+                t.add_row(
+                    m.ticker,
+                    f"[{score_style}]{m.momentum_score:.0f}[/{score_style}]",
+                    f"{m.daily_gain_pct:+.1f}%",
+                    f"{m.volume_ratio:.1f}x",
+                    "YES" if m.is_52w_high else "--",
+                    f"{m.gap_up_pct:+.1f}%",
+                    f"{m.rsi_14:.0f}",
+                    str(m.consecutive_green),
+                )
+            console.print(t)
+        else:
+            console.print("[dim]No momentum signals found[/dim]")
         return
 
     # ── Mode: single scan ───────────────────────────────────
@@ -189,10 +251,11 @@ def main() -> None:
 
     if notifier:
         notifier.send(
-            f"🤖 StockBot v2 started ({mode_str})\n"
+            f"StockBot v3 started ({mode_str})\n"
             f"Next scan: {next_run_str(cfg.timezone)}\n"
-            f"Watching {len(watchlist)} tickers\n"
-            f"Max positions: {cfg.max_positions} | Min confidence: {cfg.min_confidence}%"
+            f"Safe: {len(watchlist)} tickers | Aggressive: {wl_info['tier2_count']} tickers\n"
+            f"Max positions: {cfg.max_positions}+{cfg.agg_max_positions} | Aggressive: {agg_str}\n"
+            f"Catalyst min: {cfg.min_catalyst_score}/10"
         )
 
     # Live dashboard with scheduler

@@ -48,6 +48,24 @@ class Config:
     max_sector_pct: float = field(default_factory=lambda: float(_env("MAX_SECTOR_PCT", "20.0")))
     earnings_blackout_days: int = field(default_factory=lambda: int(_env("EARNINGS_BLACKOUT_DAYS", "3")))
 
+    # ── Aggressive strategy (v3) ───────────────────────────
+    agg_enabled: bool = field(default_factory=lambda: _env("AGG_ENABLED", "true").lower() in ("true", "1", "yes"))
+    agg_stop_loss_pct: float = field(default_factory=lambda: float(_env("AGG_STOP_LOSS_PCT", "5.0")))
+    agg_tp_tier1: float = field(default_factory=lambda: float(_env("AGG_TP_TIER1", "15.0")))
+    agg_tp_tier2: float = field(default_factory=lambda: float(_env("AGG_TP_TIER2", "30.0")))
+    agg_tp_tier3: float = field(default_factory=lambda: float(_env("AGG_TP_TIER3", "50.0")))
+    agg_max_positions: int = field(default_factory=lambda: int(_env("AGG_MAX_POSITIONS", "5")))
+    min_catalyst_score: int = field(default_factory=lambda: int(_env("MIN_CATALYST_SCORE", "7")))
+
+    # Momentum scanner thresholds
+    momentum_min_gain_pct: float = field(default_factory=lambda: float(_env("MOMENTUM_MIN_GAIN_PCT", "5.0")))
+    momentum_vol_multiplier: float = field(default_factory=lambda: float(_env("MOMENTUM_VOL_MULTIPLIER", "3.0")))
+
+    # Conviction-based position sizing (% of portfolio)
+    agg_size_moderate_pct: float = field(default_factory=lambda: float(_env("AGG_SIZE_MODERATE_PCT", "5.0")))
+    agg_size_high_pct: float = field(default_factory=lambda: float(_env("AGG_SIZE_HIGH_PCT", "15.0")))
+    agg_size_max_pct: float = field(default_factory=lambda: float(_env("AGG_SIZE_MAX_PCT", "25.0")))
+
     # Scheduler
     scan_hour: int = field(default_factory=lambda: int(_env("SCAN_HOUR", "9")))
     scan_minute: int = field(default_factory=lambda: int(_env("SCAN_MINUTE", "0")))

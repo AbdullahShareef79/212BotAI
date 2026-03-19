@@ -2,6 +2,8 @@
 
 v2: Added sector, confidence, price_target, trailing_stop_high,
     partial_sold, sell_type columns for the upgraded strategy.
+v3: Added strategy_type, catalyst_score, catalyst_type,
+    position_size_pct, tp_tier for aggressive/hybrid strategy.
 """
 
 from __future__ import annotations
@@ -41,6 +43,12 @@ class TradeRecord:
     trailing_stop_high: float | None = None
     partial_sold: bool = False
     sell_type: str = ""  # TP_PARTIAL / TP_FULL / SL / TRAILING_SL / SENTIMENT / REBALANCE
+    # v3 fields
+    strategy_type: str = "SAFE"  # SAFE / AGGRESSIVE
+    catalyst_score: int = 0
+    catalyst_type: str = ""
+    position_size_pct: float = 0.0
+    tp_tier: int = 0  # 0=none, 1=+15%, 2=+30%, 3=+50%
 
 
 # Step 1: create tables (no indexes – they may reference columns not yet migrated)
@@ -66,7 +74,12 @@ CREATE TABLE IF NOT EXISTS trades (
     price_target_timeframe TEXT   DEFAULT '',
     trailing_stop_high    REAL,
     partial_sold          INTEGER DEFAULT 0,
-    sell_type             TEXT    DEFAULT ''
+    sell_type             TEXT    DEFAULT '',
+    strategy_type         TEXT    DEFAULT 'SAFE',
+    catalyst_score        INTEGER DEFAULT 0,
+    catalyst_type         TEXT    DEFAULT '',
+    position_size_pct     REAL    DEFAULT 0.0,
+    tp_tier               INTEGER DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS scan_log (
@@ -82,6 +95,9 @@ CREATE TABLE IF NOT EXISTS scan_log (
     earnings_blackout INTEGER DEFAULT 0,
     sector          TEXT    DEFAULT '',
     action          TEXT,
+    strategy_type   TEXT    DEFAULT 'SAFE',
+    catalyst_score  INTEGER DEFAULT 0,
+    momentum_score  REAL    DEFAULT 0,
     timestamp       TEXT    NOT NULL
 );
 """
@@ -92,6 +108,7 @@ _SCHEMA_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_trades_side   ON trades(side)",
     "CREATE INDEX IF NOT EXISTS idx_trades_sector ON trades(sector)",
     "CREATE INDEX IF NOT EXISTS idx_scan_log_ts   ON scan_log(timestamp)",
+    "CREATE INDEX IF NOT EXISTS idx_trades_strategy ON trades(strategy_type)",
 ]
 
 # Columns to add to existing databases (idempotent migration)
@@ -107,6 +124,15 @@ _MIGRATIONS = [
     "ALTER TABLE scan_log ADD COLUMN rs_vs_sp500 REAL",
     "ALTER TABLE scan_log ADD COLUMN earnings_blackout INTEGER DEFAULT 0",
     "ALTER TABLE scan_log ADD COLUMN sector TEXT DEFAULT ''",
+    # v3 migrations
+    "ALTER TABLE trades ADD COLUMN strategy_type TEXT DEFAULT 'SAFE'",
+    "ALTER TABLE trades ADD COLUMN catalyst_score INTEGER DEFAULT 0",
+    "ALTER TABLE trades ADD COLUMN catalyst_type TEXT DEFAULT ''",
+    "ALTER TABLE trades ADD COLUMN position_size_pct REAL DEFAULT 0.0",
+    "ALTER TABLE trades ADD COLUMN tp_tier INTEGER DEFAULT 0",
+    "ALTER TABLE scan_log ADD COLUMN strategy_type TEXT DEFAULT 'SAFE'",
+    "ALTER TABLE scan_log ADD COLUMN catalyst_score INTEGER DEFAULT 0",
+    "ALTER TABLE scan_log ADD COLUMN momentum_score REAL DEFAULT 0",
 ]
 
 
@@ -156,8 +182,10 @@ class TradeDB:
              sentiment, sentiment_score, rsi, bb_pband,
              reason, dry_run, pnl, timestamp,
              sector, confidence, price_target, price_target_timeframe,
-             trailing_stop_high, partial_sold, sell_type)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             trailing_stop_high, partial_sold, sell_type,
+             strategy_type, catalyst_score, catalyst_type,
+             position_size_pct, tp_tier)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
         with self._conn() as conn:
             cur = conn.execute(sql, (
@@ -167,6 +195,8 @@ class TradeDB:
                 t.timestamp or datetime.utcnow().isoformat(),
                 t.sector, t.confidence, t.price_target, t.price_target_timeframe,
                 t.trailing_stop_high, int(t.partial_sold), t.sell_type,
+                t.strategy_type, t.catalyst_score, t.catalyst_type,
+                t.position_size_pct, t.tp_tier,
             ))
             trade_id = cur.lastrowid
             log.info("Recorded %s trade #%d: %s qty=%.4f @%.2f", t.side, trade_id, t.ticker, t.quantity, t.price)
@@ -215,9 +245,18 @@ class TradeDB:
         with self._conn() as conn:
             conn.execute(sql, (trade_id,))
 
-    def count_open_positions(self) -> int:
-        """Count current open positions."""
-        return len(self.get_open_buys())
+    def update_tp_tier(self, trade_id: int, tp_tier: int) -> None:
+        """Update the take-profit tier reached for an aggressive position."""
+        sql = "UPDATE trades SET tp_tier = ? WHERE id = ?"
+        with self._conn() as conn:
+            conn.execute(sql, (tp_tier, trade_id))
+
+    def count_open_positions(self, strategy_type: str | None = None) -> int:
+        """Count current open positions, optionally filtered by strategy."""
+        buys = self.get_open_buys()
+        if strategy_type:
+            return len([b for b in buys if b.get("strategy_type", "SAFE") == strategy_type])
+        return len(buys)
 
     def get_all_trades(self, limit: int = 100) -> list[dict]:
         sql = "SELECT * FROM trades ORDER BY timestamp DESC LIMIT ?"
@@ -255,18 +294,23 @@ class TradeDB:
         rs_vs_sp500: float = 0.0,
         earnings_blackout: bool = False,
         sector: str = "",
+        strategy_type: str = "SAFE",
+        catalyst_score: int = 0,
+        momentum_score: float = 0.0,
     ) -> None:
         sql = """
         INSERT INTO scan_log
             (ticker, sentiment, sentiment_score, confidence, rsi, macd_hist,
-             bb_pband, rs_vs_sp500, earnings_blackout, sector, action, timestamp)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             bb_pband, rs_vs_sp500, earnings_blackout, sector, action,
+             strategy_type, catalyst_score, momentum_score, timestamp)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
         with self._conn() as conn:
             conn.execute(sql, (
                 ticker, sentiment, sentiment_score, confidence,
                 rsi, macd_hist, bb_pband, rs_vs_sp500,
                 int(earnings_blackout), sector, action,
+                strategy_type, catalyst_score, momentum_score,
                 datetime.utcnow().isoformat(),
             ))
 
