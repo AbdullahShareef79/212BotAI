@@ -19,6 +19,8 @@ from dataclasses import dataclass, field
 
 from openai import OpenAI
 
+from bot.sentiment import _robust_parse_json
+
 log = logging.getLogger(__name__)
 
 _CATALYST_SYSTEM_PROMPT = """\
@@ -186,31 +188,32 @@ class CatalystAnalyzer:
                 raw = raw[:-3]
             raw = raw.strip()
 
-            data = json.loads(raw)
+            data = _robust_parse_json(raw)
 
             # Parse individual catalysts
             catalysts = []
             for c in data.get("catalysts", []):
-                catalysts.append(CatalystDetail(
-                    type=c.get("type", "OTHER"),
-                    description=c.get("description", ""),
-                    strength=int(c.get("strength", 1)),
-                    timeframe=c.get("timeframe", "UNKNOWN"),
-                ))
+                if isinstance(c, dict):
+                    catalysts.append(CatalystDetail(
+                        type=c.get("type", "OTHER"),
+                        description=c.get("description", ""),
+                        strength=int(c.get("strength", 1)),
+                        timeframe=c.get("timeframe", "UNKNOWN"),
+                    ))
 
             result = CatalystResult(
                 ticker=ticker,
-                catalyst_score=int(data.get("catalyst_score", 1)),
-                primary_catalyst=data.get("primary_catalyst", "NONE"),
-                catalyst_type=data.get("catalyst_type", "OTHER"),
+                catalyst_score=int(float(data.get("catalyst_score", 1))),
+                primary_catalyst=str(data.get("primary_catalyst", "NONE")),
+                catalyst_type=str(data.get("catalyst_type", "OTHER")),
                 catalysts=catalysts,
-                short_interest_risk=data.get("short_interest_risk", "UNKNOWN"),
+                short_interest_risk=str(data.get("short_interest_risk", "UNKNOWN")),
                 earnings_surprise_pct=data.get("earnings_surprise_pct"),
-                institutional_activity=data.get("institutional_activity", "UNKNOWN"),
-                momentum_sustainability=data.get("momentum_sustainability", "LOW"),
-                entry_urgency=data.get("entry_urgency", "NO_RUSH"),
-                risk_reward_ratio=data.get("risk_reward_ratio", "FAIR"),
-                reasoning=data.get("reasoning", ""),
+                institutional_activity=str(data.get("institutional_activity", "UNKNOWN")),
+                momentum_sustainability=str(data.get("momentum_sustainability", "LOW")),
+                entry_urgency=str(data.get("entry_urgency", "NO_RUSH")),
+                risk_reward_ratio=str(data.get("risk_reward_ratio", "FAIR")),
+                reasoning=str(data.get("reasoning", "")),
                 red_flags=data.get("red_flags", []),
                 raw=raw,
             )
@@ -222,10 +225,6 @@ class CatalystAnalyzer:
                 result.reasoning[:80],
             )
             return result
-
-        except json.JSONDecodeError:
-            log.warning("Could not parse catalyst JSON for %s: %s", ticker, raw[:300])
-            return _default_catalyst(ticker, "JSON parse error")
 
         except Exception as exc:
             log.error("Catalyst analysis error for %s: %s", ticker, exc)

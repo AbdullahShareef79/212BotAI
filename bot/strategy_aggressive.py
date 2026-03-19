@@ -258,6 +258,7 @@ class AggressiveStrategy:
     ) -> list[AggressiveScanResult]:
         results: list[AggressiveScanResult] = []
         open_count = self.db.count_open_positions()
+        alloc_pct = sector_allocation_pct(self.db.get_open_buys())
 
         for signal in momentum_signals:
             ticker = signal.ticker
@@ -273,6 +274,15 @@ class AggressiveStrategy:
 
             # Skip if already holding
             if self.db.get_open_buy_for_ticker(ticker):
+                continue
+
+            # ── Sector allocation cap (shared with safe strategy) ──
+            if alloc_pct.get(sector, 0) >= cfg.max_sector_pct:
+                results.append(AggressiveScanResult(
+                    ticker, "HOLD",
+                    f"Sector cap: {sector} at {alloc_pct.get(sector, 0):.0f}% (max {cfg.max_sector_pct}%)",
+                    momentum=signal, sector=sector,
+                ))
                 continue
 
             # Momentum score threshold
@@ -338,6 +348,8 @@ class AggressiveStrategy:
                 conviction_tier, position_size_pct,
             )
             open_count += 1
+            # Refresh sector allocation after buy
+            alloc_pct = sector_allocation_pct(self.db.get_open_buys())
             results.append(AggressiveScanResult(
                 ticker, "BUY", reason,
                 momentum=signal, catalyst=cat, sentiment=sent,
