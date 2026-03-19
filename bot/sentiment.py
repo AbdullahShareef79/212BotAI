@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 
 from openai import OpenAI
@@ -142,6 +143,105 @@ def _default_result(reason: str = "No data") -> AnalysisResult:
     )
 
 
+# ── Robust JSON parsing with regex fallback ─────────────
+
+def _regex_extract_str(raw: str, key: str, default: str = "") -> str:
+    """Extract a string value for *key* from malformed JSON via regex."""
+    m = re.search(rf'"{key}"\s*:\s*"([^"]*?)"', raw, re.DOTALL)
+    return m.group(1).strip() if m else default
+
+
+def _regex_extract_num(raw: str, key: str, default: float = 0.0) -> float:
+    """Extract a numeric value for *key* from malformed JSON via regex."""
+    m = re.search(rf'"{key}"\s*:\s*([\d.\-+eE]+)', raw)
+    if m:
+        try:
+            return float(m.group(1))
+        except ValueError:
+            pass
+    return default
+
+
+def _regex_extract_nullable_num(raw: str, key: str) -> float | None:
+    """Extract a numeric value that may be null."""
+    m = re.search(rf'"{key}"\s*:\s*(null|[\d.\-+eE]+)', raw, re.IGNORECASE)
+    if m:
+        val = m.group(1)
+        if val.lower() == "null":
+            return None
+        try:
+            return float(val)
+        except ValueError:
+            pass
+    return None
+
+
+def _regex_extract_list(raw: str, key: str) -> list[str]:
+    """Extract a JSON array of strings for *key* via regex."""
+    m = re.search(rf'"{key}"\s*:\s*\[([^\]]*?)\]', raw, re.DOTALL)
+    if m:
+        return re.findall(r'"([^"]+?)"', m.group(1))
+    return []
+
+
+def _fix_trailing_commas(text: str) -> str:
+    """Remove trailing commas before } or ] that break json.loads()."""
+    text = re.sub(r',\s*([}\]])', r'\1', text)
+    return text
+
+
+def _robust_parse_json(raw: str) -> dict:
+    """Try multiple strategies to parse GPT's JSON output.
+
+    1. Standard json.loads()
+    2. json.loads() after fixing trailing commas & adding missing brackets
+    3. Field-by-field regex extraction as last resort
+
+    Never raises – always returns a dict (possibly with defaults).
+    """
+    # ── Attempt 1: vanilla parse ─────────────────────────────
+    try:
+        return json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+    # ── Attempt 2: fix common GPT mistakes ───────────────────
+    fixed = _fix_trailing_commas(raw)
+    # Ensure the JSON object is closed
+    open_braces = fixed.count("{") - fixed.count("}")
+    if open_braces > 0:
+        fixed += "}" * open_braces
+    open_brackets = fixed.count("[") - fixed.count("]")
+    if open_brackets > 0:
+        fixed += "]" * open_brackets
+    try:
+        return json.loads(fixed)
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+    # ── Attempt 3: regex extraction per field ────────────────
+    log.warning("JSON repair failed – falling back to regex extraction")
+    return {
+        "sentiment":             _regex_extract_str(raw, "sentiment", "NEUTRAL"),
+        "sentiment_score":       _regex_extract_num(raw, "sentiment_score", 0.0),
+        "earnings_outlook":      _regex_extract_str(raw, "earnings_outlook", "STABLE"),
+        "earnings_reasoning":    _regex_extract_str(raw, "earnings_reasoning"),
+        "valuation":             _regex_extract_str(raw, "valuation", "FAIR"),
+        "pe_vs_sector":          _regex_extract_str(raw, "pe_vs_sector", "AVERAGE"),
+        "valuation_reasoning":   _regex_extract_str(raw, "valuation_reasoning"),
+        "insider_activity":      _regex_extract_str(raw, "insider_activity", "NEUTRAL"),
+        "insider_reasoning":     _regex_extract_str(raw, "insider_reasoning"),
+        "analyst_consensus":     _regex_extract_str(raw, "analyst_consensus", "HOLD"),
+        "analyst_reasoning":     _regex_extract_str(raw, "analyst_reasoning"),
+        "confidence":            _regex_extract_num(raw, "confidence", 0),
+        "confidence_reasoning":  _regex_extract_str(raw, "confidence_reasoning"),
+        "price_target":          _regex_extract_nullable_num(raw, "price_target"),
+        "price_target_timeframe": _regex_extract_str(raw, "price_target_timeframe"),
+        "summary":               _regex_extract_str(raw, "summary"),
+        "risk_factors":          _regex_extract_list(raw, "risk_factors"),
+    }
+
+
 class SentimentAnalyzer:
     """Wraps OpenAI chat-completion for comprehensive stock analysis."""
 
@@ -181,24 +281,24 @@ class SentimentAnalyzer:
                 raw = raw[:-3]
             raw = raw.strip()
 
-            data = json.loads(raw)
+            data = _robust_parse_json(raw)
             result = AnalysisResult(
-                sentiment=data.get("sentiment", "NEUTRAL").upper(),
+                sentiment=str(data.get("sentiment", "NEUTRAL")).upper(),
                 sentiment_score=float(data.get("sentiment_score", data.get("score", 0.0))),
-                earnings_outlook=data.get("earnings_outlook", "STABLE").upper(),
-                earnings_reasoning=data.get("earnings_reasoning", ""),
-                valuation=data.get("valuation", "FAIR").upper(),
-                pe_vs_sector=data.get("pe_vs_sector", "AVERAGE").upper(),
-                valuation_reasoning=data.get("valuation_reasoning", ""),
-                insider_activity=data.get("insider_activity", "NEUTRAL").upper(),
-                insider_reasoning=data.get("insider_reasoning", ""),
-                analyst_consensus=data.get("analyst_consensus", "HOLD").upper(),
-                analyst_reasoning=data.get("analyst_reasoning", ""),
-                confidence=int(data.get("confidence", 0)),
-                confidence_reasoning=data.get("confidence_reasoning", ""),
+                earnings_outlook=str(data.get("earnings_outlook", "STABLE")).upper(),
+                earnings_reasoning=str(data.get("earnings_reasoning", "")),
+                valuation=str(data.get("valuation", "FAIR")).upper(),
+                pe_vs_sector=str(data.get("pe_vs_sector", "AVERAGE")).upper(),
+                valuation_reasoning=str(data.get("valuation_reasoning", "")),
+                insider_activity=str(data.get("insider_activity", "NEUTRAL")).upper(),
+                insider_reasoning=str(data.get("insider_reasoning", "")),
+                analyst_consensus=str(data.get("analyst_consensus", "HOLD")).upper(),
+                analyst_reasoning=str(data.get("analyst_reasoning", "")),
+                confidence=int(float(data.get("confidence", 0))),
+                confidence_reasoning=str(data.get("confidence_reasoning", "")),
                 price_target=data.get("price_target"),
                 price_target_timeframe=data.get("price_target_timeframe"),
-                summary=data.get("summary", ""),
+                summary=str(data.get("summary", "")),
                 risk_factors=data.get("risk_factors", []),
                 raw=raw,
             )
@@ -209,10 +309,6 @@ class SentimentAnalyzer:
                 result.analyst_consensus, result.summary[:80],
             )
             return result
-
-        except json.JSONDecodeError:
-            log.warning("Could not parse OpenAI JSON for %s: %s", ticker, raw[:300])
-            return _default_result("JSON parse error")
 
         except Exception as exc:
             log.error("OpenAI analysis error for %s: %s", ticker, exc)
