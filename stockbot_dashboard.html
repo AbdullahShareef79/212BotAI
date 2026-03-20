@@ -748,8 +748,6 @@ async function loadDashPos() {
 
     tbody.innerHTML = rows.map(p => {
       const cls = sigCls(p.pnl_pct);
-      const healthScore = p.confidence ? Math.min(100, Math.round((p.pnl_pct||0)*2 + (p.confidence||0))) : null;
-      const healthColor = healthScore == null ? 'var(--text3)' : healthScore >= 70 ? '#00e676' : healthScore >= 40 ? '#ffab00' : '#ff4444';
       return `<tr>
         <td><b>${p.ticker}</b></td>
         <td>${stratBdg(p.strategy_type)}</td>
@@ -798,12 +796,14 @@ async function loadPositions() {
   try {
     const rows = await get('/api/positions');
     if (!rows.length) {
-      tbody.innerHTML = '<tr><td colspan="14" class="empty"><div class="empty-icon">📭</div>No open positions</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="15" class="empty"><div class="empty-icon">📭</div>No open positions</td></tr>';
       return;
     }
     tbody.innerHTML = rows.map(p => {
       const cls = sigCls(p.pnl_pct);
       const age = daysSince(p.timestamp);
+      const healthScore = p.confidence ? Math.min(100, Math.round((p.pnl_pct||0)*2 + (p.confidence||0))) : null;
+      const healthColor = healthScore == null ? 'var(--text3)' : healthScore >= 70 ? '#00e676' : healthScore >= 40 ? '#ffab00' : '#ff4444';
       return `<tr>
         <td><b>${p.ticker}</b></td>
         <td>${stratBdg(p.strategy_type)}</td>
@@ -1167,9 +1167,14 @@ async function loadIntelligence() {
       insiderEl.style.color = ins.includes('BUY') ? '#00e676' : ins.includes('SELL') ? '#ff4444' : '#9e9e9e';
     }
     if (pcEl) {
-      const pc = d.avg_put_call != null ? d.avg_put_call.toFixed(2) : '—';
-      pcEl.textContent = pc === '—' ? '—' : pc + (d.avg_put_call < 0.7 ? '  📈 BULLISH' : d.avg_put_call > 1.3 ? '  📉 BEARISH' : '  ⚖️ NEUTRAL');
-      pcEl.style.color = d.avg_put_call < 0.7 ? '#00e676' : d.avg_put_call > 1.3 ? '#ff4444' : '#ffab00';
+      const pcVal = (d.avg_put_call != null && !isNaN(d.avg_put_call)) ? d.avg_put_call : null;
+      if (pcVal == null) {
+        pcEl.textContent = '—'; pcEl.style.color = '#9e9e9e';
+      } else {
+        const tag = pcVal < 0.7 ? '  📈 BULLISH' : pcVal > 1.3 ? '  📉 BEARISH' : '  ⚖️ NEUTRAL';
+        pcEl.textContent = pcVal.toFixed(2) + tag;
+        pcEl.style.color = pcVal < 0.7 ? '#00e676' : pcVal > 1.3 ? '#ff4444' : '#ffab00';
+      }
     }
     if (analystEl) {
       const ac = d.analyst_consensus || '—';

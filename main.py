@@ -237,7 +237,13 @@ def main() -> None:
 
     # ── Mode: scheduled ─────────────────────────────────────
     def on_scan():
-        single_scan(strategy, dashboard, watchlist)
+        try:
+            single_scan(strategy, dashboard, watchlist)
+        except Exception as _scan_exc:
+            log.error("Scan cycle failed: %s", _scan_exc, exc_info=True)
+            if notifier:
+                notifier.send(f"⚠️ StockBot scan error:\n{_scan_exc}")
+            return
         dashboard.set_next_scan(next_run_str(cfg.timezone))
         # Weekly rebalance on configured day
         if datetime.now().strftime("%A").lower() == cfg.rebalance_day.lower():

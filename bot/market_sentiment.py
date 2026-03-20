@@ -33,8 +33,9 @@ _API_URL = "https://api.alternative.me/fng/?limit=1"
 class FearGreedResult:
     value: int = 50               # 0-100
     label: str = "Neutral"        # "Extreme Fear" / "Fear" / "Neutral" / "Greed" / "Extreme Greed"
-    is_buying_opportunity: bool = False   # value < 30 — extreme fear = contrarian buy
-    avoid_buying: bool = False            # value > 80 — extreme greed = caution
+    signal: str = "NEUTRAL"       # EXTREME_FEAR_BUY / FEAR / NEUTRAL / GREED / EXTREME_GREED_AVOID
+    is_buying_opportunity: bool = False   # value <= 25 — extreme fear = contrarian buy
+    avoid_buying: bool = False            # value >= 75 — extreme greed = caution
     error: str = ""
 
 
@@ -54,9 +55,21 @@ def get_fear_greed() -> FearGreedResult:
         value = int(entry["value"])
         label = str(entry["value_classification"])
 
+        if value <= 25:
+            signal = "EXTREME FEAR — BUY OPPORTUNITY"
+        elif value <= 45:
+            signal = "FEAR — Proceed with caution"
+        elif value <= 55:
+            signal = "NEUTRAL"
+        elif value <= 75:
+            signal = "GREED"
+        else:
+            signal = "EXTREME GREED — AVOID NEW LONGS"
+
         result = FearGreedResult(
             value=value,
             label=label,
+            signal=signal,
             is_buying_opportunity=value <= 25,
             avoid_buying=value >= 75,
         )

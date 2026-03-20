@@ -221,15 +221,24 @@ def market_intelligence():
         except Exception as exc:
             result["fear_greed"] = {"error": str(exc)}
 
-        # Most recent scan log rows (latest scan cycle)
+        # Most recent scan log rows — try last 48 h first, fall back to latest 50 rows
         scan_rows = _q("""
             SELECT ticker, reddit_score, insider_signal, put_call_ratio,
                    analyst_score, timestamp as scanned_at
             FROM scan_log
-            WHERE timestamp >= datetime('now', '-2 hours')
-            ORDER BY reddit_score DESC
+            WHERE timestamp >= datetime('now', '-48 hours')
+            ORDER BY timestamp DESC, reddit_score DESC
             LIMIT 50
         """)
+        if not scan_rows:
+            # No recent scan data — grab the most recent rows regardless of age
+            scan_rows = _q("""
+                SELECT ticker, reddit_score, insider_signal, put_call_ratio,
+                       analyst_score, timestamp as scanned_at
+                FROM scan_log
+                ORDER BY timestamp DESC
+                LIMIT 50
+            """)
 
         # Top Reddit mentions from last scan
         reddit_rows = [

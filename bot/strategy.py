@@ -452,14 +452,21 @@ class Strategy:
                     f" earnings={sent.earnings_outlook} val={sent.valuation}"
                     f" analyst={sent.analyst_consensus}{pt_str}"
                 )
-                self._execute_buy(ticker, ind, sent, reason, sector)
-                open_count += 1
-                # Update allocation
-                alloc_pct = sector_allocation_pct(self.db.get_open_buys())
-                results.append(ScanResult(
-                    ticker, "BUY", reason, ind, sent,
-                    confidence=sent.confidence, sector=sector, rs_ratio=rs_ratio,
-                ))
+                try:
+                    self._execute_buy(ticker, ind, sent, reason, sector)
+                    open_count += 1
+                    alloc_pct = sector_allocation_pct(self.db.get_open_buys())
+                    results.append(ScanResult(
+                        ticker, "BUY", reason, ind, sent,
+                        confidence=sent.confidence, sector=sector, rs_ratio=rs_ratio,
+                    ))
+                except Exception as _buy_exc:
+                    log.error("_execute_buy failed for %s: %s", ticker, _buy_exc, exc_info=True)
+                    if self.notifier:
+                        self.notifier.send(f"⚠️ BUY execution error {ticker}: {_buy_exc}")
+                    results.append(ScanResult(ticker, "HOLD", f"Buy failed: {_buy_exc}", ind, sent,
+                        confidence=sent.confidence, sector=sector, rs_ratio=rs_ratio,
+                    ))
             else:
                 if sent.confidence < cfg.min_confidence:
                     reason = f"Confidence too low: {sent.confidence}% (need >={cfg.min_confidence}%)"
