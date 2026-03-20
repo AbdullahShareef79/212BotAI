@@ -95,9 +95,10 @@ CREATE TABLE IF NOT EXISTS scan_log (
     earnings_blackout INTEGER DEFAULT 0,
     sector          TEXT    DEFAULT '',
     action          TEXT,
-    strategy_type   TEXT    DEFAULT 'SAFE',
+    strategy_type         TEXT    DEFAULT 'SAFE',
     catalyst_score  INTEGER DEFAULT 0,
     momentum_score  REAL    DEFAULT 0,
+    reject_gate     TEXT    DEFAULT '',
     timestamp       TEXT    NOT NULL
 );
 """
@@ -133,6 +134,8 @@ _MIGRATIONS = [
     "ALTER TABLE scan_log ADD COLUMN strategy_type TEXT DEFAULT 'SAFE'",
     "ALTER TABLE scan_log ADD COLUMN catalyst_score INTEGER DEFAULT 0",
     "ALTER TABLE scan_log ADD COLUMN momentum_score REAL DEFAULT 0",
+    # v4 migrations
+    "ALTER TABLE scan_log ADD COLUMN reject_gate TEXT DEFAULT ''",
 ]
 
 
@@ -297,13 +300,14 @@ class TradeDB:
         strategy_type: str = "SAFE",
         catalyst_score: int = 0,
         momentum_score: float = 0.0,
+        reject_gate: str = "",
     ) -> None:
         sql = """
         INSERT INTO scan_log
             (ticker, sentiment, sentiment_score, confidence, rsi, macd_hist,
              bb_pband, rs_vs_sp500, earnings_blackout, sector, action,
-             strategy_type, catalyst_score, momentum_score, timestamp)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             strategy_type, catalyst_score, momentum_score, reject_gate, timestamp)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
         with self._conn() as conn:
             conn.execute(sql, (
@@ -311,8 +315,41 @@ class TradeDB:
                 rsi, macd_hist, bb_pband, rs_vs_sp500,
                 int(earnings_blackout), sector, action,
                 strategy_type, catalyst_score, momentum_score,
-                datetime.utcnow().isoformat(),
+                reject_gate, datetime.utcnow().isoformat(),
             ))
+
+    def get_rejection_stats(self, days: int = 30) -> list[dict]:
+        """Return rejection gate counts from scan_log for the last N days."""
+        sql = """
+        SELECT reject_gate, COUNT(*) AS count, COUNT(DISTINCT ticker) AS unique_tickers
+        FROM scan_log
+        WHERE reject_gate != '' AND reject_gate != 'BUY'
+          AND timestamp >= datetime('now', ?)
+        GROUP BY reject_gate
+        ORDER BY count DESC
+        """
+        with self._conn() as conn:
+            rows = conn.execute(sql, (f"-{days} days",)).fetchall()
+            return [dict(r) for r in rows]
+
+    def get_dry_run_summary(self) -> dict:
+        """Return P&L summary for dry-run trades only."""
+        sql = """
+        SELECT
+            COUNT(CASE WHEN side='BUY'  THEN 1 END)                               AS signals,
+            COUNT(CASE WHEN side='SELL' THEN 1 END)                               AS closed,
+            COALESCE(SUM (CASE WHEN side='SELL' THEN pnl ELSE 0 END), 0)          AS total_pnl,
+            COALESCE(SUM (CASE WHEN side='SELL' AND pnl > 0 THEN 1 ELSE 0 END), 0) AS wins,
+            COALESCE(SUM (CASE WHEN side='SELL' AND pnl <= 0 THEN 1 ELSE 0 END), 0) AS losses,
+            COALESCE(AVG (CASE WHEN side='SELL' THEN pnl END), 0)                 AS avg_pnl,
+            COALESCE(AVG (CASE WHEN side='SELL' AND pnl > 0  THEN pnl END), 0)    AS avg_win,
+            COALESCE(AVG (CASE WHEN side='SELL' AND pnl <= 0 THEN pnl END), 0)    AS avg_loss
+        FROM trades
+        WHERE dry_run = 1
+        """
+        with self._conn() as conn:
+            row = conn.execute(sql).fetchone()
+            return dict(row) if row else {}
 
     def get_recent_scans(self, limit: int = 50) -> list[dict]:
         sql = "SELECT * FROM scan_log ORDER BY timestamp DESC LIMIT ?"

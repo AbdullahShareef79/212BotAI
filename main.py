@@ -152,6 +152,7 @@ def main() -> None:
     console.print(
         f"  Max Positions: {cfg.max_positions} safe + {cfg.agg_max_positions} aggressive"
         f"   Min Confidence: {cfg.min_confidence}%"
+        f"   Min Hold: {cfg.min_hold_days}d   Sector Cap: {cfg.max_sector_pct:.0f}%"
     )
     console.print(
         f"  Safe TP: +{cfg.take_profit_pct}% (partial +{cfg.partial_tp_pct}%)"
@@ -333,6 +334,36 @@ def _show_analytics(db: TradeDB) -> None:
                 f"{b.win_rate:.0f}%", f"€{b.avg_pnl:+.2f}", f"€{b.total_pnl:+.2f}",
             )
         console.print(table)
+
+    # Rejection gate stats
+    if report.rejection_stats:
+        table = Table(title="🚧 Scan Gate Rejections (last 30 days)", show_header=True)
+        table.add_column("Gate", style="bold")
+        table.add_column("Rejections", justify="right")
+        table.add_column("Unique Tickers", justify="right")
+        for r in report.rejection_stats:
+            table.add_row(
+                r["reject_gate"], str(r["count"]), str(r.get("unique_tickers", "–")),
+            )
+        console.print(table)
+
+    # Paper trading score
+    ps = report.paper_score
+    if ps and ps.total_signals > 0:
+        pnl_color = "green" if ps.total_pnl >= 0 else "red"
+        exp_color = "green" if ps.expectancy >= 0 else "red"
+        console.print(Panel.fit(
+            f"[bold]Signals:[/bold] {ps.total_signals}  "
+            f"[bold]Closed:[/bold] {ps.closed_signals}  "
+            f"[bold]Win Rate:[/bold] {ps.win_rate:.1f}%  "
+            f"[bold]P&L:[/bold] [{pnl_color}]€{ps.total_pnl:+.2f}[/{pnl_color}]  "
+            f"[bold]Avg/Trade:[/bold] €{ps.avg_pnl:+.2f}  "
+            f"[bold]Avg Win:[/bold] €{ps.avg_win:+.2f}  "
+            f"[bold]Avg Loss:[/bold] €{ps.avg_loss:+.2f}  "
+            f"[bold]Expectancy:[/bold] [{exp_color}]€{ps.expectancy:+.2f}[/{exp_color}]  "
+            f"[bold]Avg Hold:[/bold] {ps.avg_hold_days:.1f}d",
+            title="🧪 Paper Trading Score (Dry-Run Simulation)",
+        ))
 
 
 if __name__ == "__main__":

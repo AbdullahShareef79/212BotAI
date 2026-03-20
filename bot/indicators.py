@@ -42,7 +42,7 @@ class Indicators:
 
     @property
     def rsi_oversold(self) -> bool:
-        return self.rsi < 40
+        return self.rsi < 45
 
     @property
     def macd_bullish(self) -> bool:

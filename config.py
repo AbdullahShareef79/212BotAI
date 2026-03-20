@@ -38,14 +38,16 @@ class Config:
     # Strategy
     dry_run: bool = field(default_factory=lambda: _env("DRY_RUN", "true").lower() in ("true", "1", "yes"))
     order_size_eur: float = field(default_factory=lambda: float(_env("ORDER_SIZE_EUR", "100")))
-    take_profit_pct: float = field(default_factory=lambda: float(_env("TAKE_PROFIT_PCT", "8.0")))
-    stop_loss_pct: float = field(default_factory=lambda: float(_env("STOP_LOSS_PCT", "2.0")))
-    partial_tp_pct: float = field(default_factory=lambda: float(_env("PARTIAL_TP_PCT", "3.0")))
+    take_profit_pct: float = field(default_factory=lambda: float(_env("TAKE_PROFIT_PCT", "15.0")))
+    stop_loss_pct: float = field(default_factory=lambda: float(_env("STOP_LOSS_PCT", "4.0")))
+    partial_tp_pct: float = field(default_factory=lambda: float(_env("PARTIAL_TP_PCT", "5.0")))
     min_confidence: int = field(default_factory=lambda: int(_env("MIN_CONFIDENCE", "75")))
+    min_sell_confidence: int = field(default_factory=lambda: int(_env("MIN_SELL_CONFIDENCE", "60")))
 
     # Portfolio limits
     max_positions: int = field(default_factory=lambda: int(_env("MAX_POSITIONS", "10")))
-    max_sector_pct: float = field(default_factory=lambda: float(_env("MAX_SECTOR_PCT", "20.0")))
+    max_sector_pct: float = field(default_factory=lambda: float(_env("MAX_SECTOR_PCT", "35.0")))
+    min_hold_days: int = field(default_factory=lambda: int(_env("MIN_HOLD_DAYS", "5")))
     earnings_blackout_days: int = field(default_factory=lambda: int(_env("EARNINGS_BLACKOUT_DAYS", "3")))
 
     # ── Aggressive strategy (v3) ───────────────────────────

@@ -244,7 +244,7 @@ class Strategy:
             # ── AI sentiment check (sell immediately if negative) ──
             headlines = self.news.fetch_headlines(ticker, days_back=2, max_articles=8)
             sent = self.analyzer.analyze(ticker, headlines)
-            if sent.is_negative:
+            if sent.is_negative and sent.confidence >= cfg.min_sell_confidence:
                 reason = (
                     f"AI sentiment NEGATIVE (conf={sent.confidence}%): "
                     f"{sent.summary[:80]} – selling regardless of P&L ({pnl_pct:+.2f}%)"
@@ -256,9 +256,14 @@ class Strategy:
                 ))
                 continue
 
+            sentiment_note = (
+                f"sentiment NEGATIVE but conf={sent.confidence}% < {cfg.min_sell_confidence}% threshold"
+                if sent.is_negative
+                else "sentiment OK"
+            )
             results.append(ScanResult(
                 ticker, "HOLD",
-                f"P&L {pnl_pct:+.2f}%, trailing high €{trailing_high:.2f}, sentiment OK",
+                f"P&L {pnl_pct:+.2f}%, trailing high €{trailing_high:.2f}, {sentiment_note}",
                 ind, sent, entry_price, pnl_pct,
                 confidence=sent.confidence, sector=sector,
             ))
@@ -300,6 +305,11 @@ class Strategy:
             # ── Earnings blackout ────────────────────────────
             in_blackout = is_in_earnings_blackout(ticker)
             if in_blackout:
+                self.db.log_scan(
+                    ticker, "SKIPPED", 0, 0, 0, 0, "HOLD",
+                    earnings_blackout=True, sector=sector,
+                    reject_gate="EARNINGS_BLACKOUT",
+                )
                 results.append(ScanResult(
                     ticker, "HOLD", f"Earnings blackout (within {cfg.earnings_blackout_days} days)",
                     sector=sector, earnings_blackout=True,
@@ -315,13 +325,13 @@ class Strategy:
             if not ind.rsi_oversold or not ind.at_lower_bb:
                 reason_parts = []
                 if not ind.rsi_oversold:
-                    reason_parts.append(f"RSI={ind.rsi:.1f} (need <40)")
+                    reason_parts.append(f"RSI={ind.rsi:.1f} (need <45)")
                 if not ind.at_lower_bb:
                     reason_parts.append(f"BB%={ind.bb_pband:.2f} (not at lower)")
                 reason = "Technicals not met: " + ", ".join(reason_parts)
                 self.db.log_scan(
                     ticker, "SKIPPED", 0, ind.rsi, ind.macd_hist, ind.bb_pband,
-                    "HOLD", sector=sector,
+                    "HOLD", sector=sector, reject_gate="TECHNICALS",
                 )
                 results.append(ScanResult(ticker, "HOLD", reason, ind, sector=sector))
                 continue
@@ -334,6 +344,7 @@ class Strategy:
                 self.db.log_scan(
                     ticker, "SKIPPED", 0, ind.rsi, ind.macd_hist, ind.bb_pband,
                     "HOLD", rs_vs_sp500=rs.rs_ratio, sector=sector,
+                    reject_gate="REL_STRENGTH",
                 )
                 results.append(ScanResult(
                     ticker, "HOLD", reason, ind, sector=sector, rs_ratio=rs_ratio,
@@ -344,6 +355,14 @@ class Strategy:
             headlines = self.news.fetch_headlines(ticker, days_back=3, max_articles=10)
             sent = self.analyzer.analyze(ticker, headlines)
 
+            # Determine rejection gate for scan log
+            if sent.bullish:
+                _gate = "BUY"
+            elif sent.confidence < cfg.min_confidence:
+                _gate = "AI_LOW_CONFIDENCE"
+            else:
+                _gate = "AI_NEGATIVE"
+
             self.db.log_scan(
                 ticker, sent.sentiment, sent.sentiment_score,
                 ind.rsi, ind.macd_hist, ind.bb_pband,
@@ -351,6 +370,7 @@ class Strategy:
                 confidence=sent.confidence,
                 rs_vs_sp500=rs_ratio or 0,
                 sector=sector,
+                reject_gate=_gate,
             )
 
             # Buy requires: POSITIVE sentiment AND confidence >= 75
@@ -534,41 +554,79 @@ class Strategy:
     # ── weekly rebalance ─────────────────────────────────────
 
     def run_rebalance(self) -> list[ScanResult]:
-        """Weekly rebalance: sell positions in over-allocated sectors."""
+        """Weekly rebalance: sell the worst over-allocated position in each sector.
+
+        Positions younger than cfg.min_hold_days are protected – they need
+        time to reach partial TP before we churn them out.
+        """
         results: list[ScanResult] = []
         open_buys = self.db.get_open_buys()
         alloc = sector_allocation_pct(open_buys)
+        now = datetime.utcnow()
 
         for sector, pct in alloc.items():
-            if pct > cfg.max_sector_pct:
-                # Find the worst-performing position in this sector
-                sector_positions = [
-                    b for b in open_buys if get_sector(b["ticker"]) == sector
-                ]
-                if not sector_positions:
+            if pct <= cfg.max_sector_pct:
+                continue
+
+            sector_positions = [
+                b for b in open_buys if get_sector(b["ticker"]) == sector
+            ]
+            if not sector_positions:
+                continue
+
+            # Enrich with current P&L and position age
+            for pos in sector_positions:
+                ind = fetch_indicators(pos["ticker"])
+                pos["_current_pnl"] = (
+                    ((ind.close - pos["price"]) / pos["price"]) * 100 if ind else 0.0
+                )
+                try:
+                    ts = datetime.fromisoformat(pos["timestamp"])
+                    pos["_age_days"] = max(0, (now - ts).days)
+                except Exception:
+                    pos["_age_days"] = 999  # unknown age – eligible for rebalance
+
+            # Sort worst P&L first so we sell the biggest drag
+            sector_positions.sort(key=lambda p: p.get("_current_pnl", 0))
+
+            sold = False
+            for candidate in sector_positions:
+                ticker = candidate["ticker"]
+                age_days = candidate.get("_age_days", 999)
+
+                if age_days < cfg.min_hold_days:
+                    log.info(
+                        "Rebalance: SKIPPING %s – only %dd old (min_hold=%dd)",
+                        ticker, age_days, cfg.min_hold_days,
+                    )
+                    results.append(ScanResult(
+                        ticker, "HOLD",
+                        f"Rebalance skipped: {age_days}d old (min hold={cfg.min_hold_days}d, "
+                        f"sector={sector} at {pct:.0f}%)",
+                        sector=sector,
+                    ))
                     continue
 
-                # Sort by P&L (worst first)
-                for pos in sector_positions:
-                    ind = fetch_indicators(pos["ticker"])
-                    if not ind:
-                        continue
-                    pnl_pct = ((ind.close - pos["price"]) / pos["price"]) * 100
-                    pos["_current_pnl"] = pnl_pct
-
-                sector_positions.sort(key=lambda p: p.get("_current_pnl", 0))
-
-                # Sell the worst performer to bring sector down
-                worst = sector_positions[0]
-                ind = fetch_indicators(worst["ticker"])
+                ind = fetch_indicators(ticker)
                 if ind:
-                    pnl_pct = worst.get("_current_pnl", 0)
-                    reason = f"Rebalance: {sector} at {pct:.0f}% (max {cfg.max_sector_pct}%)"
-                    self._execute_sell(worst["ticker"], ind, worst, pnl_pct, reason, sell_type="REBALANCE")
+                    pnl_pct = candidate.get("_current_pnl", 0)
+                    reason = (
+                        f"Rebalance: {sector} at {pct:.0f}% (max {cfg.max_sector_pct}%) "
+                        f"– {ticker} age={age_days}d P&L={pnl_pct:+.1f}%"
+                    )
+                    self._execute_sell(ticker, ind, candidate, pnl_pct, reason, sell_type="REBALANCE")
                     results.append(ScanResult(
-                        worst["ticker"], "SELL", reason, ind,
+                        ticker, "SELL", reason, ind,
                         pnl_pct=pnl_pct, sector=sector, sell_type="REBALANCE",
                     ))
-                    log.info("Rebalanced: sold %s from %s sector", worst["ticker"], sector)
+                    log.info("Rebalanced: sold %s from %s sector (%dd old)", ticker, sector, age_days)
+                    sold = True
+                    break  # one sell per sector per rebalance cycle
+
+            if not sold:
+                log.info(
+                    "Rebalance: %s at %.0f%% – all %d positions protected by min_hold_days=%d",
+                    sector, pct, len(sector_positions), cfg.min_hold_days,
+                )
 
         return results
