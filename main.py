@@ -94,7 +94,7 @@ def build_components(force_dry: bool = False, force_live: bool = False, no_aggre
     if no_aggressive:
         object.__setattr__(_cfg_mod.cfg, "agg_enabled", False)
 
-    t212 = Trading212Client(cfg.trading212_api_key, cfg.trading212_base_url)
+    t212 = Trading212Client(cfg.trading212_api_key, cfg.trading212_base_url, cfg.trading212_api_secret)
     news = NewsClient(cfg.newsapi_key)
     analyzer = SentimentAnalyzer(cfg.openai_api_key, model="gpt-4o-mini")
     catalyst_analyzer = CatalystAnalyzer(cfg.openai_api_key, model="gpt-4o-mini")

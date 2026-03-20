@@ -21,6 +21,12 @@ TIER1_SAFE: list[str] = [
     "PEP", "ABT", "TMO", "MRK", "AVGO", "COST", "NKE", "CVX",
     "LLY", "ORCL", "ACN", "MCD", "MDT", "TXN", "QCOM", "AMD",
     "PYPL", "AMGN", "LOW", "IBM", "GE", "CAT", "BA", "SBUX", "UBER",
+    # Energy (outperforming)
+    "SLB", "EOG", "PSX", "MPC", "VLO",
+    # Financials (stable)
+    "GS", "MS", "BLK", "AXP", "SPGI",
+    # Industrials momentum
+    "RTX", "LMT", "NOC", "GD",
 ]
 
 # ── Tier 2: Small/Mid-Cap Momentum Candidates (Aggressive) ─
@@ -28,31 +34,31 @@ TIER1_SAFE: list[str] = [
 # Grouped by sector for easier management.
 TIER2_AGGRESSIVE: list[str] = [
     # ── Biotech / Pharma (high catalyst potential: FDA, trials) ──
-    "CRSP", "BEAM", "EDIT", "NTLA", "RARE", "SGEN", "IONS", "ALNY",
-    "ARWR", "FATE", "TWST", "CERT", "RCKT", "APLS", "IMVT", "KRTX",
-    "PCVX", "RVMD", "INSM", "XERS", "ITCI", "PRTA", "CRNX", "BMRN",
+    "CRSP", "BEAM", "EDIT", "NTLA", "RARE", "IONS", "ALNY",
+    "ARWR", "FATE", "TWST", "CERT", "RCKT", "APLS", "IMVT",
+    "PCVX", "RVMD", "INSM", "XERS", "PRTA", "CRNX", "BMRN",
     "HALO", "SRPT", "VRTX", "REGN", "MRNA", "BNTX", "STVN", "IOVA",
 
     # ── Tech / Software (growth momentum, SaaS) ────────────────
     "CRWD", "ZS", "NET", "DDOG", "MDB", "SNOW", "CFLT", "ESTC",
     "BILL", "HUBS", "TTD", "ROKU", "U", "PATH", "MNDY", "ASAN",
-    "BRZE", "FRSH", "DOCN", "GTLB", "SMAR", "DLO", "QLYS", "TENB",
+    "BRZE", "FRSH", "DOCN", "GTLB", "DLO", "QLYS", "TENB",
     "VRNS", "RPD", "CYBR", "PANW", "FTNT", "OKTA", "SAIL", "IOT",
 
     # ── EV / Clean Energy (sector catalyst plays) ──────────────
-    "RIVN", "LCID", "FSLR", "ENPH", "SEDG", "RUN", "NOVA", "ARRY",
+    "RIVN", "LCID", "FSLR", "ENPH", "SEDG", "RUN", "ARRY",
     "CHPT", "BLNK", "QS", "PLUG", "BE", "BLDP", "CLNE", "STEM",
 
     # ── Fintech / Payments ─────────────────────────────────────
-    "SQ", "AFRM", "SOFI", "UPST", "LMND", "ROOT", "HOOD", "MELI",
-    "NU", "PAGS", "STNE", "FOUR", "NUVEI", "BILL",
+    "AFRM", "SOFI", "UPST", "LMND", "ROOT", "HOOD", "MELI",
+    "NU", "PAGS", "STNE", "FOUR", "NUVEI",
 
     # ── E-commerce / Consumer ──────────────────────────────────
     "SHOP", "SE", "PINS", "SNAP", "ETSY", "W", "CHWY", "RVLV",
-    "REAL", "WISH", "BIGC", "VTEX", "MNSO", "CPNG", "GLBE",
+    "REAL", "VTEX", "MNSO", "CPNG", "GLBE",
 
     # ── Space / Defense / Aerospace ────────────────────────────
-    "RKLB", "ASTS", "BKSY", "RDW", "SPIR", "ASTR", "LUNR",
+    "RKLB", "ASTS", "BKSY", "RDW", "SPIR", "LUNR",
     "KTOS", "PLTR", "JOBY",
 
     # ── Semiconductors (small-mid) ─────────────────────────────
@@ -60,23 +66,21 @@ TIER2_AGGRESSIVE: list[str] = [
     "LSCC", "SLAB", "MRVL", "SWKS", "QRVO", "DIOD", "POWI",
 
     # ── Mining / Commodities (cyclical momentum) ───────────────
-    "MP", "LAC", "LTHM", "PLL", "SLI", "UUUU", "CCJ", "DNN",
+    "MP", "LAC", "SLI", "UUUU", "CCJ", "DNN",
     "NXE", "UEC", "LEU", "VALE", "RIO",
 
     # ── Meme / High Short Interest (squeeze potential) ─────────
-    "GME", "AMC", "BBBY", "CLOV", "WKHS", "SPCE", "IRNT",
-    "ATER", "PROG", "GSAT",
+    "GME", "AMC", "ATER", "GSAT",
 
     # ── Cannabis (regulatory catalyst) ─────────────────────────
-    "TLRY", "CGC", "ACB", "SNDL", "CRON", "GRWG",
+    "TLRY", "CRON", "GRWG",
 
     # ── AI / Robotics / Frontier Tech ──────────────────────────
-    "UPST", "BBAI", "PRCT", "ISRG", "NURO", "SSYS", "DM", "XONE",
-    "NNOX", "LAZR", "VLDR", "INVZ", "LIDR", "MVIS",
+    "BBAI", "PRCT", "ISRG", "SSYS", "NNOX", "INVZ", "LIDR", "MVIS",
 
     # ── Healthcare / MedTech (small) ───────────────────────────
-    "DXCM", "NVST", "ALGN", "TNDM", "PODD", "SWAV", "SILK",
-    "INSP", "NARI", "GKOS", "IRTC",
+    "DXCM", "NVST", "ALGN", "TNDM", "PODD",
+    "INSP", "GKOS", "IRTC",
 ]
 
 # De-duplicate Tier 2 (some may appear twice across sectors)

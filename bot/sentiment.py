@@ -107,6 +107,10 @@ class AnalysisResult:
     risk_factors: list[str] = field(default_factory=list)
     raw: str = ""
 
+    # v4 multi-source fields (optional, default-safe)
+    time_horizon: int | None = None   # predicted holding period in days
+    catalyst: str = ""                # key upcoming catalyst identified by AI
+
     @property
     def is_positive(self) -> bool:
         return self.sentiment == "POSITIVE"
@@ -124,6 +128,64 @@ class AnalysisResult:
     def bullish(self) -> bool:
         """Combined: positive sentiment AND high confidence."""
         return self.is_positive and self.is_high_confidence
+
+
+# ── Multi-source system prompt (v4) ────────────────────────
+_MULTI_SYSTEM_PROMPT = """\
+You are an elite quantitative hedge fund analyst with access to
+multi-source intelligence. Analyze all provided data sources together
+to make a holistic BUY/HOLD/SELL decision. Weight insider buying and
+options flow heavily as these represent smart money. Reddit/trends
+represent retail momentum. News represents current narrative.
+
+Respond with ONLY a JSON object (no markdown fences, no extra text):
+
+{
+  "sentiment": "<POSITIVE | NEGATIVE | NEUTRAL>",
+  "sentiment_score": <float -1.0 to +1.0>,
+
+  "earnings_outlook": "<IMPROVING | STABLE | DECLINING>",
+  "earnings_reasoning": "<one sentence>",
+
+  "valuation": "<UNDERVALUED | FAIR | OVERVALUED>",
+  "pe_vs_sector": "<BELOW_AVERAGE | AVERAGE | ABOVE_AVERAGE>",
+  "valuation_reasoning": "<one sentence>",
+
+  "insider_activity": "<NET_BUYING | NEUTRAL | NET_SELLING>",
+  "insider_reasoning": "<one sentence interpreting the SEC/insider data>",
+
+  "analyst_consensus": "<STRONG_BUY | BUY | HOLD | SELL | STRONG_SELL>",
+  "analyst_reasoning": "<one sentence interpreting the analyst data>",
+
+  "confidence": <integer 0-100>,
+  "confidence_reasoning": "<holistic reasoning across ALL data sources>",
+
+  "price_target": <float or null>,
+  "price_target_timeframe": "<e.g. '3 months' or null>",
+
+  "catalyst": "<key upcoming catalyst or empty string>",
+  "time_horizon": <integer days or null>,
+
+  "summary": "<2-3 sentence holistic investment thesis>",
+  "risk_factors": ["<risk 1>", "<risk 2>"]
+}
+
+Confidence scoring guide:
+  0-30:   Avoid — multiple red flags or conflicting signals
+  31-69:  Below threshold — interesting but not compelling enough
+  70-85:  Buy territory — multiple positive signals align
+  86-100: Very high conviction — smart money + fundamentals + momentum agree
+
+Signal weights (apply cumulatively):
+  SEC insider NET_BUYING (Form 4 filings)   → +15 confidence
+  Options P/C ratio < 0.7 (heavy calls)     → +10 confidence
+  Unusual options volume (3× avg)           → +8  confidence
+  Analyst upgrades in last 7 days           → +7  per upgrade (cap at +21)
+  Reddit score > 70                         → +5  confidence (retail momentum)
+  Google Trends FOMO signal active          → +5  confidence (retail interest)
+  Fear & Greed < 30 (Extreme Fear)          → contrarian opportunity, note it
+  Fear & Greed > 80 (Extreme Greed)         → caution, market overextended
+"""
 
 
 # Backwards-compatible alias so existing code referencing SentimentResult still works
@@ -313,3 +375,152 @@ class SentimentAnalyzer:
         except Exception as exc:
             log.error("OpenAI analysis error for %s: %s", ticker, exc)
             return _default_result(f"API error: {exc}")
+
+    def analyze_multi(
+        self,
+        ticker: str,
+        headlines: list[dict],
+        reddit_result=None,
+        fear_greed=None,
+        insider=None,
+        options_flow=None,
+        analyst_data=None,
+        trends_data=None,
+    ) -> AnalysisResult:
+        """Multi-source AI analysis: news + Reddit + Fear&Greed + insider + options + analysts + trends.
+
+        Each data source is optional — pass None to skip it.
+        Falls back to the standard analysis if only headlines are available.
+        Never raises; returns a neutral default on total failure.
+        """
+        # Build the comprehensive user message
+        news_payload = [
+            {"title": h.get("title", ""), "description": h.get("description", "")}
+            for h in headlines[:15]
+        ]
+        parts: list[str] = [f"Ticker: {ticker}"]
+        parts.append(f"\n### NEWS HEADLINES (last 3 days)\n{json.dumps(news_payload, indent=2)}")
+
+        if reddit_result and not reddit_result.error:
+            r_tone = (
+                "bullish" if reddit_result.sentiment_avg > 0.1
+                else "bearish" if reddit_result.sentiment_avg < -0.1
+                else "neutral"
+            )
+            parts.append(
+                f"\n### REDDIT INTELLIGENCE\n"
+                f"Score: {reddit_result.reddit_score:.0f}/100 | "
+                f"Mentions (24h): {reddit_result.mention_count} | Tone: {r_tone}"
+            )
+            if reddit_result.top_comments:
+                comments_str = "\n".join(f"  - {c[:180]}" for c in reddit_result.top_comments[:3])
+                parts.append(f"Top comments:\n{comments_str}")
+
+        if fear_greed and not fear_greed.error:
+            if fear_greed.is_buying_opportunity:
+                fg_note = "BUYING OPPORTUNITY — extreme fear (contrarian)"
+            elif fear_greed.avoid_buying:
+                fg_note = "CAUTION — extreme greed (market overextended)"
+            else:
+                fg_note = "neutral territory"
+            parts.append(
+                f"\n### FEAR & GREED INDEX\n"
+                f"Value: {fear_greed.value}/100 ({fear_greed.label}) — {fg_note}"
+            )
+
+        if insider and not insider.error:
+            parts.append(
+                f"\n### SEC INSIDER ACTIVITY (last 14 days)\n"
+                f"Signal: {insider.signal} | {insider.summary}"
+            )
+
+        if options_flow and not options_flow.error and options_flow.put_call_ratio is not None:
+            unusual = "YES — SMART MONEY SIGNAL" if options_flow.unusual_volume else "No"
+            parts.append(
+                f"\n### OPTIONS FLOW\n"
+                f"Put/Call Ratio: {options_flow.put_call_ratio:.2f} ({options_flow.signal}) | "
+                f"Calls: {options_flow.call_volume:,} | Puts: {options_flow.put_volume:,} | "
+                f"Unusual Volume: {unusual}"
+            )
+
+        if analyst_data and not analyst_data.error:
+            parts.append(
+                f"\n### ANALYST RATINGS (last 30 days)\n"
+                f"Consensus: {analyst_data.consensus} | Score: {analyst_data.analyst_score:+.2f} | "
+                f"Buys: {analyst_data.buy_count} | Holds: {analyst_data.hold_count} | "
+                f"Sells: {analyst_data.sell_count} | Recent upgrades (7d): {analyst_data.recent_upgrades}"
+            )
+
+        if trends_data and not trends_data.error:
+            fomo = "YES" if trends_data.fomo_signal else "No"
+            parts.append(
+                f"\n### GOOGLE TRENDS\n"
+                f"Interest Score: {trends_data.current_score:.0f}/100 | "
+                f"Week-over-Week: {trends_data.wow_change_pct:+.1f}% | FOMO Signal: {fomo}"
+            )
+
+        user_msg = "\n".join(parts)
+
+        # Nothing to analyze at all?
+        has_data = bool(headlines) or any([
+            reddit_result, fear_greed, insider, options_flow, analyst_data, trends_data
+        ])
+        if not has_data:
+            log.info("No multi-source data for %s — returning neutral default", ticker)
+            return _default_result("No data available for multi-source analysis.")
+
+        try:
+            resp = self._client.chat.completions.create(
+                model=self._model,
+                temperature=0.15,
+                max_tokens=900,
+                messages=[
+                    {"role": "system", "content": _MULTI_SYSTEM_PROMPT},
+                    {"role": "user",   "content": user_msg},
+                ],
+            )
+            raw = resp.choices[0].message.content.strip()
+            if raw.startswith("```"):
+                raw = raw.split("\n", 1)[1] if "\n" in raw else raw[3:]
+            if raw.endswith("```"):
+                raw = raw[:-3]
+            raw = raw.strip()
+
+            data   = _robust_parse_json(raw)
+            result = AnalysisResult(
+                sentiment=str(data.get("sentiment", "NEUTRAL")).upper(),
+                sentiment_score=float(data.get("sentiment_score", 0.0)),
+                earnings_outlook=str(data.get("earnings_outlook", "STABLE")).upper(),
+                earnings_reasoning=str(data.get("earnings_reasoning", "")),
+                valuation=str(data.get("valuation", "FAIR")).upper(),
+                pe_vs_sector=str(data.get("pe_vs_sector", "AVERAGE")).upper(),
+                valuation_reasoning=str(data.get("valuation_reasoning", "")),
+                insider_activity=str(data.get("insider_activity", "NEUTRAL")).upper(),
+                insider_reasoning=str(data.get("insider_reasoning", "")),
+                analyst_consensus=str(data.get("analyst_consensus", "HOLD")).upper(),
+                analyst_reasoning=str(data.get("analyst_reasoning", "")),
+                confidence=int(float(data.get("confidence", 0))),
+                confidence_reasoning=str(data.get("confidence_reasoning", "")),
+                price_target=data.get("price_target"),
+                price_target_timeframe=data.get("price_target_timeframe"),
+                summary=str(data.get("summary", "")),
+                risk_factors=data.get("risk_factors", []),
+                raw=raw,
+                time_horizon=(
+                    int(data["time_horizon"]) if data.get("time_horizon") else None
+                ),
+                catalyst=str(data.get("catalyst", "")),
+            )
+            log.info(
+                "Multi-AI %s: %s conf=%d%% insider=%s options=%s analyst=%s | %s",
+                ticker, result.sentiment, result.confidence,
+                result.insider_activity,
+                options_flow.signal if options_flow and not options_flow.error else "N/A",
+                result.analyst_consensus,
+                result.summary[:80],
+            )
+            return result
+
+        except Exception as exc:
+            log.error("OpenAI multi-source error for %s: %s", ticker, exc)
+            return _default_result(f"Multi-source API error: {exc}")

@@ -44,6 +44,8 @@ from bot.watchlist import (
     TIER1_SAFE, TIER2_AGGRESSIVE, get_tier,
     get_safe_watchlist, get_aggressive_watchlist,
 )
+# v4 multi-source intelligence
+from bot.market_sentiment import get_fear_greed
 
 log = logging.getLogger(__name__)
 
@@ -277,6 +279,13 @@ class Strategy:
         open_count = self.db.count_open_positions()
         alloc_pct = sector_allocation_pct(self.db.get_open_buys())
 
+        # Fetch Fear & Greed once per scan cycle (shared market context)
+        _fear_greed = None
+        try:
+            _fear_greed = get_fear_greed()
+        except Exception as _fge:
+            log.debug("Fear & Greed unavailable: %s", _fge)
+
         for ticker in tickers:
             sector = get_sector(ticker)
 
@@ -325,7 +334,7 @@ class Strategy:
             if not ind.rsi_oversold or not ind.at_lower_bb:
                 reason_parts = []
                 if not ind.rsi_oversold:
-                    reason_parts.append(f"RSI={ind.rsi:.1f} (need <45)")
+                    reason_parts.append(f"RSI={ind.rsi:.1f} (need <50)")
                 if not ind.at_lower_bb:
                     reason_parts.append(f"BB%={ind.bb_pband:.2f} (not at lower)")
                 reason = "Technicals not met: " + ", ".join(reason_parts)
@@ -351,12 +360,67 @@ class Strategy:
                 ))
                 continue
 
-            # ── AI Analysis (only if all other filters pass) ──
+            # ── AI Analysis (only if all other filters pass) ──────────────────────
             headlines = self.news.fetch_headlines(ticker, days_back=3, max_articles=10)
-            sent = self.analyzer.analyze(ticker, headlines)
+
+            # ── Gather multi-source intelligence (each source is optional) ──────
+            _reddit = _insider = _options = _analysts = _trends = None
+            _sources: list[str] = ["NEWS"]
+
+            try:
+                if cfg.enable_reddit:
+                    from bot.reddit_scanner import get_reddit_score
+                    _reddit = get_reddit_score(ticker)
+                    _sources.append("REDDIT")
+            except Exception as _e:
+                log.debug("Reddit skip %s: %s", ticker, _e)
+
+            try:
+                if cfg.enable_insider:
+                    from bot.insider import get_insider_activity
+                    _insider = get_insider_activity(ticker)
+                    _sources.append("INSIDER")
+            except Exception as _e:
+                log.debug("Insider skip %s: %s", ticker, _e)
+
+            try:
+                if cfg.enable_options_flow:
+                    from bot.options import get_options_flow
+                    _options = get_options_flow(ticker)
+                    _sources.append("OPTIONS")
+            except Exception as _e:
+                log.debug("Options skip %s: %s", ticker, _e)
+
+            try:
+                from bot.analysts import get_analyst_ratings
+                _analysts = get_analyst_ratings(ticker)
+                _sources.append("ANALYSTS")
+            except Exception as _e:
+                log.debug("Analysts skip %s: %s", ticker, _e)
+
+            try:
+                if cfg.enable_trends:
+                    from bot.trends import get_trends_score
+                    _trends = get_trends_score(ticker)
+                    _sources.append("TRENDS")
+            except Exception as _e:
+                log.debug("Trends skip %s: %s", ticker, _e)
+
+            if _fear_greed and not _fear_greed.error:
+                _sources.append("FEAR_GREED")
+
+            sent = self.analyzer.analyze_multi(
+                ticker, headlines,
+                reddit_result=_reddit,
+                fear_greed=_fear_greed,
+                insider=_insider,
+                options_flow=_options,
+                analyst_data=_analysts,
+                trends_data=_trends,
+            )
 
             # Determine rejection gate for scan log
-            if sent.bullish:
+            if sent.is_positive and sent.confidence >= cfg.min_confidence:
                 _gate = "BUY"
             elif sent.confidence < cfg.min_confidence:
                 _gate = "AI_LOW_CONFIDENCE"
@@ -366,15 +430,21 @@ class Strategy:
             self.db.log_scan(
                 ticker, sent.sentiment, sent.sentiment_score,
                 ind.rsi, ind.macd_hist, ind.bb_pband,
-                "BUY" if sent.bullish else "HOLD",
+                "BUY" if (sent.is_positive and sent.confidence >= cfg.min_confidence) else "HOLD",
                 confidence=sent.confidence,
                 rs_vs_sp500=rs_ratio or 0,
                 sector=sector,
                 reject_gate=_gate,
+                reddit_score=_reddit.reddit_score if _reddit and not _reddit.error else 0.0,
+                fear_greed=_fear_greed.value if _fear_greed and not _fear_greed.error else 50,
+                insider_signal=_insider.signal if _insider and not _insider.error else "",
+                put_call_ratio=_options.put_call_ratio if _options and not _options.error else None,
+                analyst_score=_analysts.analyst_score if _analysts and not _analysts.error else 0.0,
+                data_sources_used=",".join(_sources),
             )
 
-            # Buy requires: POSITIVE sentiment AND confidence >= 75
-            if sent.bullish:
+            # Buy requires: POSITIVE sentiment AND confidence >= cfg.min_confidence
+            if sent.is_positive and sent.confidence >= cfg.min_confidence:
                 pt_str = f", PT €{sent.price_target:.2f}" if sent.price_target else ""
                 reason = (
                     f"BUY: conf={sent.confidence}% {sent.sentiment}"
@@ -391,8 +461,8 @@ class Strategy:
                     confidence=sent.confidence, sector=sector, rs_ratio=rs_ratio,
                 ))
             else:
-                if sent.confidence < 75:
-                    reason = f"Confidence too low: {sent.confidence}% (need >=75)"
+                if sent.confidence < cfg.min_confidence:
+                    reason = f"Confidence too low: {sent.confidence}% (need >={cfg.min_confidence}%)"
                 else:
                     reason = f"Sentiment not positive: {sent.sentiment} ({sent.sentiment_score:+.2f})"
                 results.append(ScanResult(

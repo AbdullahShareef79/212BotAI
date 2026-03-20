@@ -13,10 +13,10 @@ import pathlib
 import argparse
 
 
-_TASK_NAME = "StockBotAI"
+_TASK_NAME   = "StockBotAI"
 _PROJECT_DIR = pathlib.Path(__file__).resolve().parent
-_PYTHON = sys.executable
-_SCRIPT = str(_PROJECT_DIR / "main.py")
+_PYTHON      = sys.executable
+_BAT         = str(_PROJECT_DIR / "start_all_bots.bat")
 
 
 def _get_startup_folder() -> pathlib.Path:
@@ -32,26 +32,26 @@ def _get_startup_folder() -> pathlib.Path:
 
 
 def _vbs_content() -> str:
-    """VBScript that launches the bot silently (no cmd window flash)."""
+    """VBScript that runs start_all_bots.bat silently (no cmd window flash)."""
     return (
-        f'Set WshShell = CreateObject("WScript.Shell")\n'
-        f'WshShell.Run """{_PYTHON}"" ""{_SCRIPT}""", 0, False\n'
+        'Set WshShell = CreateObject("WScript.Shell")\n'
+        f'WshShell.Run "cmd /c ""{_BAT}""", 0, False\n'
     )
 
 
 def install_startup() -> None:
     """Place a .vbs launcher in the Windows Startup folder."""
-    startup = _get_startup_folder()
+    startup  = _get_startup_folder()
     vbs_path = startup / f"{_TASK_NAME}.vbs"
     vbs_path.write_text(_vbs_content(), encoding="utf-8")
     print(f"✅ Installed: {vbs_path}")
-    print(f"   StockBot will auto-start on login using: {_PYTHON}")
-    print(f"   Script: {_SCRIPT}")
+    print(f"   StockBot will auto-start on login.")
+    print(f"   Launches: {_BAT}")
 
 
 def uninstall_startup() -> None:
     """Remove the .vbs launcher from the Startup folder."""
-    startup = _get_startup_folder()
+    startup  = _get_startup_folder()
     vbs_path = startup / f"{_TASK_NAME}.vbs"
     if vbs_path.exists():
         vbs_path.unlink()
@@ -66,7 +66,7 @@ def install_task_scheduler() -> None:
     cmd = [
         "schtasks", "/create",
         "/tn", _TASK_NAME,
-        "/tr", f'"{_PYTHON}" "{_SCRIPT}"',
+        "/tr", f'cmd /c "{_BAT}"',
         "/sc", "onlogon",
         "/rl", "limited",
         "/f",

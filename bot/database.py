@@ -99,6 +99,12 @@ CREATE TABLE IF NOT EXISTS scan_log (
     catalyst_score  INTEGER DEFAULT 0,
     momentum_score  REAL    DEFAULT 0,
     reject_gate     TEXT    DEFAULT '',
+    reddit_score    REAL    DEFAULT 0,
+    fear_greed      INTEGER DEFAULT 50,
+    insider_signal  TEXT    DEFAULT '',
+    put_call_ratio  REAL,
+    analyst_score   REAL    DEFAULT 0,
+    data_sources_used TEXT  DEFAULT '',
     timestamp       TEXT    NOT NULL
 );
 """
@@ -136,6 +142,13 @@ _MIGRATIONS = [
     "ALTER TABLE scan_log ADD COLUMN momentum_score REAL DEFAULT 0",
     # v4 migrations
     "ALTER TABLE scan_log ADD COLUMN reject_gate TEXT DEFAULT ''",
+    # v4 multi-source intelligence columns
+    "ALTER TABLE scan_log ADD COLUMN reddit_score REAL DEFAULT 0",
+    "ALTER TABLE scan_log ADD COLUMN fear_greed INTEGER DEFAULT 50",
+    "ALTER TABLE scan_log ADD COLUMN insider_signal TEXT DEFAULT ''",
+    "ALTER TABLE scan_log ADD COLUMN put_call_ratio REAL",
+    "ALTER TABLE scan_log ADD COLUMN analyst_score REAL DEFAULT 0",
+    "ALTER TABLE scan_log ADD COLUMN data_sources_used TEXT DEFAULT ''",
 ]
 
 
@@ -301,13 +314,22 @@ class TradeDB:
         catalyst_score: int = 0,
         momentum_score: float = 0.0,
         reject_gate: str = "",
+        # v4 multi-source intelligence
+        reddit_score: float = 0.0,
+        fear_greed: int = 50,
+        insider_signal: str = "",
+        put_call_ratio: float | None = None,
+        analyst_score: float = 0.0,
+        data_sources_used: str = "",
     ) -> None:
         sql = """
         INSERT INTO scan_log
             (ticker, sentiment, sentiment_score, confidence, rsi, macd_hist,
              bb_pband, rs_vs_sp500, earnings_blackout, sector, action,
-             strategy_type, catalyst_score, momentum_score, reject_gate, timestamp)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             strategy_type, catalyst_score, momentum_score, reject_gate,
+             reddit_score, fear_greed, insider_signal, put_call_ratio,
+             analyst_score, data_sources_used, timestamp)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
         with self._conn() as conn:
             conn.execute(sql, (
@@ -315,7 +337,10 @@ class TradeDB:
                 rsi, macd_hist, bb_pband, rs_vs_sp500,
                 int(earnings_blackout), sector, action,
                 strategy_type, catalyst_score, momentum_score,
-                reject_gate, datetime.utcnow().isoformat(),
+                reject_gate,
+                reddit_score, fear_greed, insider_signal, put_call_ratio,
+                analyst_score, data_sources_used,
+                datetime.utcnow().isoformat(),
             ))
 
     def get_rejection_stats(self, days: int = 30) -> list[dict]:

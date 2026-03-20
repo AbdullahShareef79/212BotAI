@@ -23,6 +23,7 @@ def _env(key: str, default: str | None = None, required: bool = False) -> str:
 class Config:
     # Trading 212
     trading212_api_key: str = field(default_factory=lambda: _env("TRADING212_API_KEY", required=True))
+    trading212_api_secret: str = field(default_factory=lambda: _env("TRADING212_API_SECRET", ""))
     trading212_env: str = field(default_factory=lambda: _env("TRADING212_ENV", "practice"))
 
     # OpenAI
@@ -73,6 +74,12 @@ class Config:
     scan_minute: int = field(default_factory=lambda: int(_env("SCAN_MINUTE", "0")))
     timezone: str = field(default_factory=lambda: _env("TIMEZONE", "Europe/Berlin"))
     rebalance_day: str = field(default_factory=lambda: _env("REBALANCE_DAY", "friday"))
+
+    # ── Multi-source intelligence (v4) ────────────────────
+    enable_reddit: bool = field(default_factory=lambda: _env("ENABLE_REDDIT", "true").lower() in ("true", "1", "yes"))
+    enable_options_flow: bool = field(default_factory=lambda: _env("ENABLE_OPTIONS_FLOW", "true").lower() in ("true", "1", "yes"))
+    enable_insider: bool = field(default_factory=lambda: _env("ENABLE_INSIDER", "true").lower() in ("true", "1", "yes"))
+    enable_trends: bool = field(default_factory=lambda: _env("ENABLE_TRENDS", "false").lower() in ("true", "1", "yes"))
 
     # Paths
     db_path: str = field(default_factory=lambda: str(_ROOT / "data" / "trades.db"))

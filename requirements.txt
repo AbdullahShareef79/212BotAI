@@ -22,3 +22,10 @@ rich>=13.7.0
 
 # Windows autostart helper
 pywin32>=306; sys_platform == "win32"
+
+# Web dashboard API
+flask>=3.0.0
+flask-cors>=4.0.0
+
+# Multi-source intelligence (v4)
+pytrends>=4.9.0
